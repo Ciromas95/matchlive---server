@@ -97,12 +97,9 @@ export function startPoller() {
       pruneLastScore(liveIds);
 
       // Poll dinamico coerente con la cache TTL live
-      const ttlSec = liveTtlSeconds(liveCount);
-      // facciamo poll un filo più lento del TTL per evitare richieste inutili
-      const nextMs = Math.max(4000, liveTtlMs(liveCount) + 300);
+// Poll dinamico coerente con la cache TTL live (ms)
+const nextMs = Math.max(4000, liveTtlMs(liveCount) + 300);
 scheduleNext(nextMs);
-
-      scheduleNext(nextMs);
     } catch (e: any) {
       console.error("poller error:", e?.message || e);
       scheduleNext(15000);
