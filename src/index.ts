@@ -18,31 +18,35 @@ app.use(express.json());
 // ===============================
 // Basic API protection (App Key)
 // ===============================
+// ===============================
+// Basic API protection (App Key)
+// ===============================
 const APP_KEY = (process.env.APP_KEY ?? "").trim();
 const REQUIRE_KEY = (process.env.REQUIRE_KEY ?? "true").toLowerCase() === "true";
 
+// 1) AUTH middleware
 app.use("/api", (req, res, next) => {
   // se non hai configurato APP_KEY e REQUIRE_KEY=true, meglio non bloccare in dev
   if (!REQUIRE_KEY) return next();
   if (!APP_KEY) return next(); // fallback: non blocca se non configurato (evita downtime)
 
-app.use("/api", (req, res, next) => {
-  // Conta utilizzo dei tuoi endpoint (NON è costo provider)
-  markEndpointHit(req.method, req.path);
-  next();
-});
-  
-const got = (
-  req.header("x-ml-key") ??
-  req.header("X-ML-KEY") ??
-  (typeof req.query.key === "string" ? req.query.key : "") ??
-  ""
-).trim();
+  const got = (
+    req.header("x-ml-key") ??
+    req.header("X-ML-KEY") ??
+    (typeof req.query.key === "string" ? req.query.key : "") ??
+    ""
+  ).trim();
 
   if (got !== APP_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
+  next();
+});
+
+// 2) ENDPOINT HITS middleware (uso app, non costo provider)
+app.use("/api", (req, res, next) => {
+  markEndpointHit(req.method, req.path);
   next();
 });
 
