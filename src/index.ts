@@ -23,6 +23,10 @@ app.use(express.json());
 // ===============================
 const APP_KEY = (process.env.APP_KEY ?? "").trim();
 const REQUIRE_KEY = (process.env.REQUIRE_KEY ?? "true").toLowerCase() === "true";
+//per l'amministratore
+const ADMIN_KEY = (process.env.ADMIN_KEY ?? "").trim();
+const REQUIRE_ADMIN_KEY =
+  (process.env.REQUIRE_ADMIN_KEY ?? "true").toLowerCase() === "true";
 
 // 1) AUTH middleware
 app.use("/api", (req, res, next) => {
@@ -132,6 +136,34 @@ app.get("/api/stats", (req: Request, res: Response) => {
   res.json({
     ...getApiStats(),
     cacheSize: cacheSize()
+  });
+});
+
+app.get("/api/admin/stats", (req: Request, res: Response) => {
+  // Se vuoi disattivare in dev: REQUIRE_ADMIN_KEY=false
+  if (!REQUIRE_ADMIN_KEY) {
+    return res.json({ ...getApiStats(), cacheSize: cacheSize() });
+  }
+
+  if (!ADMIN_KEY) {
+    return res.status(500).json({ error: "ADMIN_KEY not configured" });
+  }
+
+  const got = (
+    req.header("x-admin-key") ??
+    req.header("X-ADMIN-KEY") ??
+    (typeof req.query.adminKey === "string" ? req.query.adminKey : "") ??
+    (typeof req.query.key === "string" ? req.query.key : "") ??
+    ""
+  ).trim();
+
+  if (got !== ADMIN_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  res.json({
+    ...getApiStats(),
+    cacheSize: cacheSize(),
   });
 });
 

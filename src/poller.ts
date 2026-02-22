@@ -53,7 +53,7 @@ export function startPoller() {
         return;
       }
 
-      const data = await getLiveFixtures();
+      const data = await getLiveFixtures("live");
       const fixtures = Array.isArray(data?.response) ? data.response : [];
       const liveCount = fixtures.length;
 
@@ -89,6 +89,7 @@ export function startPoller() {
             elapsed: ev?.time?.elapsed,
             player: ev?.player?.name,
           });
+
         }
       }
 
