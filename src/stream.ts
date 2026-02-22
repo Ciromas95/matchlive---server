@@ -57,7 +57,10 @@ function shouldEmitGoal(p: any) {
 }
 
 export function addClient(res: Response, types: string[]) {
-  clients.push({ res, types: new Set(types) });
+  clients.push({
+    res,
+    types: new Set(types.map(t => t.toLowerCase()))
+  });
 }
 
 export function removeClient(res: Response) {
@@ -65,7 +68,7 @@ export function removeClient(res: Response) {
 }
 
 export function broadcast(payload: any) {
-  const type = (payload?.type ?? "").toString();
+  const type = (payload?.type ?? "").toString().toLowerCase();
 
   // DEDUPE solo per goal
   let msg: string;
