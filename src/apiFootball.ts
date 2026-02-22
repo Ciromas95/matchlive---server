@@ -1,6 +1,6 @@
 import axios from "axios";
 import { getCache, setCache } from "./cache";
-import { markApiCall, markCacheHit, markCacheMiss } from "./stats";
+import { CounterKey, markApiCall, markCacheHit, markCacheMiss } from "./stats";
 import { liveTtlMs } from "./ttl";
 
 const BASE_URL = "https://v3.football.api-sports.io";
@@ -13,7 +13,7 @@ function apiKey(): string {
   return key;
 }
 
-export async function getLiveFixtures(): Promise<any> {
+export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
   const cacheKey = "liveFixtures";
 
   const cached = getCache<any>(cacheKey);
@@ -23,7 +23,7 @@ export async function getLiveFixtures(): Promise<any> {
   }
 
   markCacheMiss();
-  markApiCall("live");
+  markApiCall(type);
 
   const res = await axios.get(`${BASE_URL}/fixtures?live=all`, {
     headers: { "x-apisports-key": apiKey() },

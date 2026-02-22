@@ -93,6 +93,5 @@ export function getApiStats() {
     // Cache
     cacheHits,
     cacheMisses,
-    
   };
 }
