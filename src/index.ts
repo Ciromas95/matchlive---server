@@ -56,7 +56,7 @@ app.get("/", (req: Request, res: Response) => {
 
 app.get("/api/live", async (req: Request, res: Response) => {
   try {
-    const data = await getLiveFixtures();
+    const data = await getLiveFixtures("live");
     res.json(data);
   } catch (e: any) {
     const status = e?.response?.status;
@@ -73,7 +73,7 @@ app.get("/api/live", async (req: Request, res: Response) => {
 
 app.get("/api/live/compact", async (req: Request, res: Response) => {
   try {
-    const data = await getLiveFixtures();
+    const data = await getLiveFixtures("compact");
     res.json({
       updatedAt: new Date().toISOString(),
       results: data?.results ?? 0,
@@ -139,7 +139,9 @@ app.get("/api/stats", (req: Request, res: Response) => {
 const PORT = Number(process.env.PORT) || 3000;
 
 // parte il poller (si auto-rallenta se non ci sono client SSE)
-startPoller();
+if (process.env.ENABLE_POLLER !== "false") {
+  startPoller();
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
