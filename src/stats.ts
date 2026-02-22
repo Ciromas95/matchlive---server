@@ -93,6 +93,6 @@ export function getApiStats() {
     // Cache
     cacheHits,
     cacheMisses,
-    debugVersion: "endpointhits-v1",
+    
   };
 }
