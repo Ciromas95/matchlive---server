@@ -5,7 +5,7 @@ import { getLiveFixtures } from "./apiFootball";
 import { toLiveCompact } from "./compact";
 import { addClient, removeClient } from "./stream";
 import { startPoller } from "./poller";
-import { getApiStats } from "./stats";
+import { getApiStats, markEndpointHit } from "./stats";
 import { cacheSize } from "./cache";
 
 
@@ -26,6 +26,12 @@ app.use("/api", (req, res, next) => {
   if (!REQUIRE_KEY) return next();
   if (!APP_KEY) return next(); // fallback: non blocca se non configurato (evita downtime)
 
+app.use("/api", (req, res, next) => {
+  // Conta utilizzo dei tuoi endpoint (NON è costo provider)
+  markEndpointHit(req.method, req.path);
+  next();
+});
+  
 const got = (
   req.header("x-ml-key") ??
   req.header("X-ML-KEY") ??
