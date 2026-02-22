@@ -26,8 +26,12 @@ app.use("/api", (req, res, next) => {
   if (!REQUIRE_KEY) return next();
   if (!APP_KEY) return next(); // fallback: non blocca se non configurato (evita downtime)
 
-  const got =
-    (req.header("x-ml-key") ?? req.header("X-ML-KEY") ?? "").trim();
+const got = (
+  req.header("x-ml-key") ??
+  req.header("X-ML-KEY") ??
+  (typeof req.query.key === "string" ? req.query.key : "") ??
+  ""
+).trim();
 
   if (got !== APP_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
