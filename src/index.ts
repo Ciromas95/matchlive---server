@@ -15,6 +15,27 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ===============================
+// Basic API protection (App Key)
+// ===============================
+const APP_KEY = (process.env.APP_KEY ?? "").trim();
+const REQUIRE_KEY = (process.env.REQUIRE_KEY ?? "true").toLowerCase() === "true";
+
+app.use("/api", (req, res, next) => {
+  // se non hai configurato APP_KEY e REQUIRE_KEY=true, meglio non bloccare in dev
+  if (!REQUIRE_KEY) return next();
+  if (!APP_KEY) return next(); // fallback: non blocca se non configurato (evita downtime)
+
+  const got =
+    (req.header("x-ml-key") ?? req.header("X-ML-KEY") ?? "").trim();
+
+  if (got !== APP_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+});
+
 app.get("/", (req: Request, res: Response) => {
   res.json({ message: "MatchLive Server attivo 🚀" });
 });
