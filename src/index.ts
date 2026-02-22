@@ -8,6 +8,7 @@ import { startPoller } from "./poller";
 import { getApiStats } from "./stats";
 import { cacheSize } from "./cache";
 
+
 dotenv.config();
 
 const app = express();
@@ -76,7 +77,7 @@ app.get("/api/stream", (req: Request, res: Response) => {
   // ✅ heartbeat (fondamentale su cloud/proxy)
   const heartbeat = setInterval(() => {
     try {
-      res.write(`data: ${JSON.stringify({ type: "ping", t: Date.now() })}\n\n`);
+      res.write(`: ping ${Date.now()}\n\n`);
     } catch {
       clearInterval(heartbeat);
       removeClient(res);
@@ -98,6 +99,7 @@ app.get("/api/stats", (req: Request, res: Response) => {
     cacheSize: cacheSize()
   });
 });
+
 
 const PORT = Number(process.env.PORT) || 3000;
 
