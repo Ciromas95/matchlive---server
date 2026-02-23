@@ -17,6 +17,65 @@ app.use(cors());
 app.use(express.json());
 
 // ===============================
+// Users metrics (anonymous heartbeat) — in memory
+// ===============================
+let usersDayKeyUTC = ""; // YYYY-MM-DD (UTC)
+let usersSeenToday = new Set<string>(); // DAU (unique devices today)
+let usersSessionsToday = 0; // sessions today (heuristic)
+const usersLastSeenByInstallId = new Map<string, number>(); // installId -> lastSeen ms
+
+function utcDayKey(d = new Date()) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function ensureUsersDay() {
+  const key = utcDayKey();
+  if (!usersDayKeyUTC) usersDayKeyUTC = key;
+
+  if (usersDayKeyUTC !== key) {
+    usersDayKeyUTC = key;
+    usersSeenToday = new Set<string>();
+    usersSessionsToday = 0;
+
+    // Nota: lastSeen lo lasciamo per calcolare "onlineNow" anche a cavallo mezzanotte.
+    // Se preferisci azzerare anche "online", decommenta:
+    // usersLastSeenByInstallId.clear();
+  }
+}
+
+/**
+ * onlineNow = installId visti negli ultimi 120 secondi.
+ * Inoltre puliamo quelli vecchi per evitare crescita infinita della Map.
+ */
+function computeOnlineNow() {
+  const now = Date.now();
+  const ONLINE_WINDOW_MS = 120 * 1000; // 120 sec
+  const GC_WINDOW_MS = 30 * 60 * 1000; // garbage collect oltre 30 min
+
+  let online = 0;
+  for (const [id, ts] of usersLastSeenByInstallId.entries()) {
+    const age = now - ts;
+
+    // GC per evitare growth infinito
+    if (age > GC_WINDOW_MS) {
+      usersLastSeenByInstallId.delete(id);
+      continue;
+    }
+
+    if (age < ONLINE_WINDOW_MS) online++;
+  }
+  return online;
+}
+
+// pulizia periodica extra (difensiva)
+setInterval(() => {
+  computeOnlineNow();
+}, 5 * 60 * 1000);
+
+// ===============================
 // Basic API protection (App Key)
 // ===============================
 const APP_KEY = (process.env.APP_KEY ?? "").trim();
@@ -100,6 +159,33 @@ app.use("/api", (req, res, next) => {
 });
 
 // ===============================
+// Metrics: heartbeat (requires x-ml-key via /api middleware)
+// ===============================
+app.post("/api/metrics/heartbeat", (req: Request, res: Response) => {
+  ensureUsersDay();
+
+  const installId = String(req.body?.installId ?? "").trim();
+  // appVersion opzionale, non serve ora
+  if (!installId || installId.length < 8) {
+    return res.status(400).json({ error: "installId required" });
+  }
+
+  const now = Date.now();
+  const prev = usersLastSeenByInstallId.get(installId);
+
+  // session = nuova se non visto da > 10 min
+  const SESSION_WINDOW_MS = 10 * 60 * 1000;
+  if (!prev || now - prev > SESSION_WINDOW_MS) {
+    usersSessionsToday += 1;
+  }
+
+  usersLastSeenByInstallId.set(installId, now);
+  usersSeenToday.add(installId);
+
+  return res.json({ ok: true });
+});
+
+// ===============================
 // Public health
 // ===============================
 app.get("/", (req: Request, res: Response) => {
@@ -127,9 +213,16 @@ app.post("/api/admin/login", (req: Request, res: Response) => {
 });
 
 app.get("/api/admin/stats", requireAdminToken, (req: Request, res: Response) => {
+  ensureUsersDay();
+
   res.json({
     ...getApiStats(),
     cacheSize: cacheSize(),
+    users: {
+      onlineNow: computeOnlineNow(),
+      dauToday: usersSeenToday.size,
+      sessionsToday: usersSessionsToday,
+    },
   });
 });
 
