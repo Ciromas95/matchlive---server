@@ -5,7 +5,6 @@ export type CounterKey =
   | "stats"
   | "lineups"
   | "other";
-let lastProviderType: CounterKey = "other";
 
 let apiCallsToday = 0;
 let apiCallsLastMinute = 0;
@@ -57,7 +56,6 @@ export function markApiCall(type: CounterKey) {
   apiCallsToday++;
   apiCallsLastMinute++;
   byTypeToday[type]++;
-  lastProviderType = type;
 }
 
 export function markCacheHit() {
@@ -86,7 +84,6 @@ export function getApiStats() {
     today: apiCallsToday,
     lastMinute: apiCallsLastMinute,
     byTypeToday,
-    lastProviderType,
 
     // Endpoint hits (uso app)
     endpointHitsToday,
