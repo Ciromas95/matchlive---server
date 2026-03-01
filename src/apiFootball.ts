@@ -57,19 +57,39 @@ export async function getPlayersByTeam(
   markCacheMiss();
   markApiCall("other");
 
-  const res = await axios.get(`${BASE_URL}/players`, {
-    headers: { 
-      "x-apisports-key": apiKey(),
-      "Accept": "application/json"
-    },
-    params: { team: teamId, season },
-    timeout: 10000,
-  });
+  const all: any[] = [];
+  let page = 1;
+  let totalPages = 1;
 
-  const data = res.data;
+  do {
+    const res = await axios.get(`${BASE_URL}/players`, {
+      headers: { "x-apisports-key": apiKey(), Accept: "application/json" },
+      params: { team: teamId, season, page },
+      timeout: 10000,
+    });
+
+    const data = res.data;
+
+    const resp = Array.isArray(data?.response) ? data.response : [];
+    all.push(...resp);
+
+    // API-Football: paging.total = numero totale pagine
+    const pagingTotal = data?.paging?.total;
+    if (pagingTotal != null) {
+      const t = Number(pagingTotal);
+      totalPages = Number.isFinite(t) && t > 0 ? t : 1;
+    } else {
+      totalPages = 1;
+    }
+
+    page += 1;
+  } while (page <= totalPages);
+
+  // Ricostruiamo lo stesso shape che usi nel resto del codice:
+  const merged = { response: all, paging: { current: totalPages, total: totalPages } };
 
   // cache 12 ore
-  setCache(cacheKey, data, 12 * 60 * 60);
+  setCache(cacheKey, merged, 12 * 60 * 60);
 
-  return data;
+  return merged;
 }
