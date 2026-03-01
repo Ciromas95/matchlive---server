@@ -4,6 +4,8 @@ import cors from "cors";
 import crypto from "crypto";
 
 import { getLiveFixtures } from "./apiFootball";
+import { getPlayersByTeam } from "./apiFootball";
+import { flagUrlFromCountryName } from "./flags";
 import { toLiveCompact } from "./compact";
 import { addClient, removeClient } from "./stream";
 import { startPoller } from "./poller";
@@ -264,6 +266,49 @@ app.get("/api/live/compact", async (req: Request, res: Response) => {
       status,
       details,
     });
+  }
+});
+
+// ===============================
+// Players flags (team -> playerId -> flag)
+// ===============================
+app.get("/api/players/flags", async (req: Request, res: Response) => {
+  try {
+    const team = Number(req.query.team);
+    const season = Number(req.query.season);
+
+    if (!team || !season) {
+      return res.status(400).json({ error: "Missing team or season" });
+    }
+
+    const data = await getPlayersByTeam(team, season);
+
+    const resp = Array.isArray(data?.response) ? data.response : [];
+    const map: Record<string, { nationality: string | null; flagUrl: string | null }> = {};
+
+    for (const item of resp) {
+      const p = item?.player;
+      const id = p?.id;
+      if (!id) continue;
+
+      const nationality = String(p?.nationality || p?.birth?.country || "").trim();
+      const flagUrl = flagUrlFromCountryName(nationality, 40);
+
+      map[String(id)] = {
+        nationality: nationality || null,
+        flagUrl,
+      };
+    }
+
+    return res.json({
+      team,
+      season,
+      count: Object.keys(map).length,
+      map,
+    });
+  } catch (e: any) {
+    console.error("[players/flags] ERROR:", e?.message ?? e);
+    return res.status(500).json({ error: "players_flags_failed" });
   }
 });
 

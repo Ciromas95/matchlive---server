@@ -42,3 +42,34 @@ setCache(cacheKey, data, ttlSeconds);
 
   return data;
 }
+export async function getPlayersByTeam(
+  teamId: number,
+  season: number
+): Promise<any> {
+  const cacheKey = `players_team_${teamId}_season_${season}`;
+
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+
+  markCacheMiss();
+  markApiCall("other");
+
+  const res = await axios.get(`${BASE_URL}/players`, {
+    headers: { 
+      "x-apisports-key": apiKey(),
+      "Accept": "application/json"
+    },
+    params: { team: teamId, season },
+    timeout: 10000,
+  });
+
+  const data = res.data;
+
+  // cache 12 ore
+  setCache(cacheKey, data, 12 * 60 * 60);
+
+  return data;
+}
