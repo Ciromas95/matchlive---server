@@ -1,12 +1,10 @@
 // src/utils/flags.ts
 const ISO2_BY_NAME: Record<string, string> = {
+  // EUROPA
   Italy: "it",
-  Argentina: "ar",
-  Serbia: "rs",
-  France: "fr",
   Spain: "es",
+  France: "fr",
   Germany: "de",
-  Brazil: "br",
   Portugal: "pt",
   Netherlands: "nl",
   Belgium: "be",
@@ -20,13 +18,43 @@ const ISO2_BY_NAME: Record<string, string> = {
   Greece: "gr",
   Ukraine: "ua",
   Russia: "ru",
-  Iran: "ir",
-  Japan: "jp",
-  "South Korea": "kr",
-  "Korea Republic": "kr",
+  Croatia: "hr",
+  Serbia: "rs",
+  Albania: "al",
+  Bosnia: "ba",
+  Montenegro: "me",
+  Kosovo: "xk",
+  "North Macedonia": "mk",
+  Slovakia: "sk",
+  Slovenia: "si",
+  Romania: "ro",
+  Bulgaria: "bg",
+  Hungary: "hu",
+  "Czech Republic": "cz",
+  Ireland: "ie",
+
+  // UK (flagcdn supporta solo ISO2)
+  England: "gb",
+  Scotland: "gb",
+  Wales: "gb",
+  "Northern Ireland": "gb",
+
+  // SUD AMERICA
+  Argentina: "ar",
+  Brazil: "br",
+  Uruguay: "uy",
+  Colombia: "co",
+  Chile: "cl",
+  Peru: "pe",
+  Venezuela: "ve",
+  Ecuador: "ec",
+
+  // NORD AMERICA
   "United States": "us",
   USA: "us",
   Mexico: "mx",
+
+  // AFRICA
   Morocco: "ma",
   Algeria: "dz",
   Tunisia: "tn",
@@ -38,12 +66,13 @@ const ISO2_BY_NAME: Record<string, string> = {
   "Ivory Coast": "ci",
   "Côte d'Ivoire": "ci",
   "Cote d'Ivoire": "ci",
-  Uruguay: "uy",
-  Colombia: "co",
-  Chile: "cl",
-  Peru: "pe",
-  Venezuela: "ve",
-  Ecuador: "ec",
+  Gambia: "gm",
+
+  // ASIA
+  Iran: "ir",
+  Japan: "jp",
+  "South Korea": "kr",
+  "Korea Republic": "kr",
 };
 
 export function normalizeCountryName(name: string): string {
