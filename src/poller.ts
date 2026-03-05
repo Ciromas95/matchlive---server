@@ -1,6 +1,7 @@
 import { getLiveFixtures } from "./apiFootball";
 import { broadcast, clientsCount } from "./stream";
 import { liveTtlMs } from "./ttl";
+import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 
 const lastScore = new Map<number, string>();
 
@@ -57,13 +58,18 @@ export function startPoller() {
       const fixtures = Array.isArray(data?.response) ? data.response : [];
       const liveCount = fixtures.length;
 
-      // per pulizia lastScore
+      // per pulizia lastScore + redcards
       const liveIds = new Set<number>();
 
       for (const f of fixtures) {
         const fixtureId = f?.fixture?.id;
         if (!fixtureId) continue;
+
         liveIds.add(fixtureId);
+
+        // ✅ RED CARDS: aggiorna cache dai events del fixture (non broadcast)
+        // TTL 90s per sicurezza
+        updateRedCardsFromFixture(fixtureId, f, 90_000);
 
         // score tracking (utile per debug / UI, ma NON lo usiamo più come “trigger unico”)
         const scoreStr = `${f?.goals?.home ?? 0}-${f?.goals?.away ?? 0}`;
@@ -89,18 +95,17 @@ export function startPoller() {
             elapsed: ev?.time?.elapsed,
             player: ev?.player?.name,
           });
-
         }
       }
 
       // pulizie memoria
-      pruneSeenEvents(6 * 60 * 60 * 1000); // 6 ore (puoi mettere 2 ore se vuoi)
+      pruneSeenEvents(6 * 60 * 60 * 1000); // 6 ore
       pruneLastScore(liveIds);
+      pruneRedCardsLive(liveIds); // ✅
 
-      // Poll dinamico coerente con la cache TTL live
-// Poll dinamico coerente con la cache TTL live (ms)
-const nextMs = Math.max(4000, liveTtlMs(liveCount) + 300);
-scheduleNext(nextMs);
+      // Poll dinamico coerente con la cache TTL live (ms)
+      const nextMs = Math.max(4000, liveTtlMs(liveCount) + 300);
+      scheduleNext(nextMs);
     } catch (e: any) {
       console.error("poller error:", e?.message || e);
       scheduleNext(15000);

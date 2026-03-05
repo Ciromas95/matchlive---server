@@ -75,6 +75,8 @@ const ISO2_BY_NAME: Record<string, string> = {
   "Korea Republic": "kr",
   "Bosnia and Herzegovina": "ba",
   "Türkiye": "tr",
+  "Republic of Ireland": "ie",
+  "IRL": "ie",
 };
 
 export function normalizeCountryName(name: string): string {

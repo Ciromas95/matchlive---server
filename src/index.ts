@@ -251,10 +251,14 @@ app.get("/api/live", async (req: Request, res: Response) => {
 app.get("/api/live/compact", async (req: Request, res: Response) => {
   try {
     const data = await getLiveFixtures("compact");
+
+    // ✅ toLiveCompact ora è async (per redCards via events cached)
+    const fixtures = await toLiveCompact(data);
+
     res.json({
       updatedAt: new Date().toISOString(),
       results: data?.results ?? 0,
-      fixtures: toLiveCompact(data),
+      fixtures,
     });
   } catch (e: any) {
     const status = e?.response?.status;
