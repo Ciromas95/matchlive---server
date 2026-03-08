@@ -13,10 +13,6 @@ function apiKey(): string {
   return key;
 }
 
-/**
- * Wrapper unico per chiamate API-Football con stats e params.
- * NOTA: qui facciamo markApiCall(type), quindi NON duplicarlo nei caller.
- */
 async function apiGet(
   path: string,
   type: CounterKey = "other",
@@ -36,9 +32,6 @@ async function apiGet(
   return res.data;
 }
 
-/**
- * Fixtures live (cache TTL dinamico in base al numero live)
- */
 export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
   const cacheKey = "liveFixtures";
 
@@ -50,7 +43,6 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
 
   markCacheMiss();
 
-  // usa apiGet (che fa già markApiCall)
   const data = await apiGet("/fixtures", type, { live: "all" });
 
   const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
@@ -60,13 +52,40 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
   return data;
 }
 
-/**
- * Events di una fixture (cache breve 60s)
- * Serve per calcolare redCards quando i fixtures live non includono gli eventi Card.
- */
+export async function getLeagueFixturesByDate(
+  leagueId: number,
+  date: string,
+  season?: number,
+  type: CounterKey = "compact"
+): Promise<any> {
+  const cacheKey = `leagueFixtures_${leagueId}_${date}_${season ?? "na"}`;
+
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+
+  markCacheMiss();
+
+  const params: Record<string, any> = {
+    league: leagueId,
+    date,
+  };
+
+  if (season) {
+    params.season = season;
+  }
+
+  const data = await apiGet("/fixtures", type, params);
+
+  setCache(cacheKey, data, 120);
+  return data;
+}
+
 export async function getFixtureEventsCached(
   fixtureId: number,
-  type: CounterKey = "other"
+  type: CounterKey = "events"
 ): Promise<any> {
   const cacheKey = `fixtureEvents_${fixtureId}`;
 
@@ -80,14 +99,10 @@ export async function getFixtureEventsCached(
 
   const data = await apiGet("/fixtures/events", type, { fixture: fixtureId });
 
-  // cache breve: 60s (solo per live)
-  setCache(cacheKey, data, 60);
+  setCache(cacheKey, data, 300);
   return data;
 }
 
-/**
- * Players by team (paginato) - cache 12h
- */
 export async function getPlayersByTeam(teamId: number, season: number): Promise<any> {
   const cacheKey = `players_team_${teamId}_season_${season}`;
 
@@ -109,7 +124,6 @@ export async function getPlayersByTeam(teamId: number, season: number): Promise<
     const resp = Array.isArray(data?.response) ? data.response : [];
     all.push(...resp);
 
-    // API-Football: paging.total = numero totale pagine
     const pagingTotal = data?.paging?.total;
     if (pagingTotal != null) {
       const t = Number(pagingTotal);
@@ -126,7 +140,6 @@ export async function getPlayersByTeam(teamId: number, season: number): Promise<
     paging: { current: totalPages, total: totalPages },
   };
 
-  // cache 12 ore
   setCache(cacheKey, merged, 12 * 60 * 60);
   return merged;
 }

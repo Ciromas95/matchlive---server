@@ -1,4 +1,5 @@
 import { getFixtureEventsCached } from "./apiFootball";
+import { getRedCardsForFixtureFromLiveCache } from "./redCardsLive";
 
 type LiteEvent = {
   type: string | null;
@@ -18,10 +19,15 @@ function mapEventsLite(events: any[]): LiteEvent[] {
   }));
 }
 
-function hasAnyCard(events: any[]): boolean {
-  return (events ?? []).some(
-    (ev: any) => String(ev?.type ?? "").toLowerCase() === "card"
-  );
+function isCardEvent(ev: any): boolean {
+  return String(ev?.type ?? "").toLowerCase().trim() === "card";
+}
+
+function isRedCardEvent(ev: any): boolean {
+  if (!isCardEvent(ev)) return false;
+
+  const detail = String(ev?.detail ?? "").toLowerCase().trim();
+  return detail.includes("red card") || detail.includes("second yellow");
 }
 
 function countRedCards(
@@ -37,14 +43,7 @@ function countRedCards(
   }
 
   for (const ev of events ?? []) {
-    const type = String(ev?.type ?? "").toLowerCase().trim();
-    if (type !== "card") continue;
-
-    const detail = String(ev?.detail ?? "").toLowerCase().trim();
-    const isRed =
-      detail.includes("red card") || detail.includes("second yellow");
-
-    if (!isRed) continue;
+    if (!isRedCardEvent(ev)) continue;
 
     const teamId = ev?.team?.id ?? null;
     if (teamId === homeTeamId) {
@@ -61,10 +60,8 @@ function countRedCards(
   };
 }
 
-function shouldFetchFullEvents(events: any[]): boolean {
-  if (!Array.isArray(events) || events.length === 0) return true;
-  if (!hasAnyCard(events)) return true;
-  return false;
+function hasAnyCard(events: any[]): boolean {
+  return (events ?? []).some((ev: any) => isCardEvent(ev));
 }
 
 function isLiveStatus(statusShort?: string | null): boolean {
@@ -72,29 +69,71 @@ function isLiveStatus(statusShort?: string | null): boolean {
   return ["1H", "2H", "HT", "ET", "BT", "P", "INT"].includes(s);
 }
 
-async function resolveFixtureEvents(f: any): Promise<any[]> {
-  const fixtureId = f?.fixture?.id;
+function hasStartedStatus(statusShort?: string | null): boolean {
+  const s = String(statusShort ?? "").toUpperCase();
+
+  if (!s) return false;
+  if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(s)) return false;
+
+  return true;
+}
+
+/**
+ * Strategia:
+ * - se ci sono già eventi nel fixture e contengono card, li usiamo subito
+ * - se è live, prima proviamo la cache redCardsLive alimentata dal poller
+ * - se serve ancora, facciamo /fixtures/events con cache
+ */
+async function resolveEventsAndReds(f: any): Promise<{
+  events: any[];
+  reds: { home: number; away: number; total: number };
+}> {
+  const fixtureId = f?.fixture?.id ?? null;
   const statusShort = f?.fixture?.status?.short ?? null;
+  const homeId: number | null = f?.teams?.home?.id ?? null;
+  const awayId: number | null = f?.teams?.away?.id ?? null;
 
   let events = Array.isArray(f?.events) ? f.events : [];
 
-  if (!fixtureId) return events;
+  // 1) Se abbiamo già card negli eventi inclusi, basta questo
+  if (events.length > 0 && hasAnyCard(events)) {
+    const reds = countRedCards(events, homeId, awayId);
+    return { events, reds };
+  }
 
-  const canFetchMore = isLiveStatus(statusShort);
+  // 2) Se è live, prova prima la cache redCardsLive del poller
+  if (fixtureId && isLiveStatus(statusShort)) {
+    const cachedLiveReds = getRedCardsForFixtureFromLiveCache(fixtureId);
+    const total = cachedLiveReds.home + cachedLiveReds.away;
 
-  if (canFetchMore && shouldFetchFullEvents(events)) {
+    if (total > 0) {
+      return {
+        events,
+        reds: {
+          home: cachedLiveReds.home,
+          away: cachedLiveReds.away,
+          total,
+        },
+      };
+    }
+  }
+
+  // 3) Se la partita è iniziata, recupera eventi completi da endpoint dedicato
+  if (fixtureId && hasStartedStatus(statusShort)) {
     try {
-      const evData = await getFixtureEventsCached(fixtureId, "other");
+      const evData = await getFixtureEventsCached(fixtureId, "events");
       const full = Array.isArray(evData?.response) ? evData.response : [];
+
       if (full.length > 0) {
         events = full;
       }
     } catch {
-      // ignore
+      // non blocchiamo tutta la risposta se gli events falliscono
     }
   }
 
-  return events;
+  const reds = countRedCards(events, homeId, awayId);
+  return { events, reds };
 }
 
 async function fixtureToCompact(f: any): Promise<any> {
@@ -103,8 +142,7 @@ async function fixtureToCompact(f: any): Promise<any> {
   const homeId: number | null = f?.teams?.home?.id ?? null;
   const awayId: number | null = f?.teams?.away?.id ?? null;
 
-  const events = await resolveFixtureEvents(f);
-  const reds = countRedCards(events, homeId, awayId);
+  const { events, reds } = await resolveEventsAndReds(f);
 
   return {
     fixtureId,
