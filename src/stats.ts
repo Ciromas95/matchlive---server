@@ -4,6 +4,7 @@ export type CounterKey =
   | "events"
   | "stats"
   | "lineups"
+  | "brainPrematch"
   | "other";
 
 let apiCallsToday = 0;
@@ -24,6 +25,7 @@ const byTypeToday: Record<CounterKey, number> = {
   events: 0,
   stats: 0,
   lineups: 0,
+  brainPrematch: 0,
   other: 0,
 };
 
