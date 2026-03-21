@@ -12,6 +12,7 @@ import { getApiStats, markEndpointHit } from "./stats";
 import { cacheSize } from "./cache";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
+import brainLiveRouter from "./routes/brainLive";
 
 dotenv.config();
 
@@ -322,16 +323,13 @@ app.get("/api/players/flags", async (req: Request, res: Response) => {
   }
 });
 
-console.log("leagueFixturesRouter =", leagueFixturesRouter);
-console.log("brainPrematchRouter =", brainPrematchRouter);
-console.log("typeof leagueFixturesRouter =", typeof leagueFixturesRouter);
-console.log("typeof brainPrematchRouter =", typeof brainPrematchRouter);
 // ===============================
 // Routers
 // ===============================
 app.use("/api/league/fixtures", leagueFixturesRouter);
 app.use("/api/brain", brainPrematchRouter);
-
+app.use("/api/brain", brainLiveRouter);
+console.log("Mounted brainLiveRouter on /api/brain");
 // ===============================
 // SSE stream
 // ===============================
@@ -396,6 +394,5 @@ if (process.env.ENABLE_POLLER !== "false") {
 }
 
 app.listen(PORT, () => {
-  console.log("index.ts nuovo caricato");
   console.log(`Server running on port ${PORT}`);
 });

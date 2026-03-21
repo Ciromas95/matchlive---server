@@ -5,6 +5,7 @@ export type CounterKey =
   | "stats"
   | "lineups"
   | "brainPrematch"
+  | "brainLive"
   | "other";
 
 let apiCallsToday = 0;
@@ -26,6 +27,7 @@ const byTypeToday: Record<CounterKey, number> = {
   stats: 0,
   lineups: 0,
   brainPrematch: 0,
+  brainLive: 0,
   other: 0,
 };
 
@@ -37,19 +39,19 @@ setInterval(() => {
 function resetIfNeeded() {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== lastResetDay) {
-apiCallsToday = 0;
-cacheHits = 0;
-cacheMisses = 0;
-apiCallsLastMinute = 0;
+    apiCallsToday = 0;
+    cacheHits = 0;
+    cacheMisses = 0;
+    apiCallsLastMinute = 0;
 
-endpointHitsToday = 0;
-endpointHitsLastMinute = 0;
-Object.keys(endpointByPathToday).forEach((k) => delete endpointByPathToday[k]);
+    endpointHitsToday = 0;
+    endpointHitsLastMinute = 0;
+    Object.keys(endpointByPathToday).forEach((k) => delete endpointByPathToday[k]);
 
-Object.keys(byTypeToday).forEach(k => {
-  byTypeToday[k as CounterKey] = 0;
-});
-lastResetDay = today;
+    Object.keys(byTypeToday).forEach((k) => {
+      byTypeToday[k as CounterKey] = 0;
+    });
+    lastResetDay = today;
   }
 }
 
@@ -82,17 +84,12 @@ export function markEndpointHit(method: string, path: string) {
 export function getApiStats() {
   resetIfNeeded();
   return {
-    // Provider calls (costo API-Football)
     today: apiCallsToday,
     lastMinute: apiCallsLastMinute,
     byTypeToday,
-
-    // Endpoint hits (uso app)
     endpointHitsToday,
     endpointHitsLastMinute,
     endpointByPathToday,
-
-    // Cache
     cacheHits,
     cacheMisses,
   };
