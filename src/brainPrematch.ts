@@ -385,20 +385,23 @@ async function buildBrainPrematch(
   const raw = await getFixturesByDateLocal(date);
   const fixtures = Array.isArray(raw?.response) ? raw.response : [];
 
-  const upcoming = fixtures
-    .filter((f: any) => {
-      const status = String(f?.fixture?.status?.short ?? "").toUpperCase();
+const MAX_PREMATCH_ANALYSIS = 24;
 
-      if (!NOT_STARTED.has(status)) return false;
-      if (!isMainEuropeanLeague(f)) return false;
+const upcoming = fixtures
+  .filter((f: any) => {
+    const status = String(f?.fixture?.status?.short ?? "").toUpperCase();
 
-      return true;
-    })
-    .sort((a: any, b: any) => {
-      const da = new Date(a?.fixture?.date ?? 0).getTime();
-      const db = new Date(b?.fixture?.date ?? 0).getTime();
-      return da - db;
-    });
+    if (!NOT_STARTED.has(status)) return false;
+    if (!isMainEuropeanLeague(f)) return false;
+
+    return true;
+  })
+  .sort((a: any, b: any) => {
+    const da = new Date(a?.fixture?.date ?? 0).getTime();
+    const db = new Date(b?.fixture?.date ?? 0).getTime();
+    return da - db;
+  })
+  .slice(0, MAX_PREMATCH_ANALYSIS);
 
   const picks: PrematchPick[] = [];
 
@@ -444,7 +447,7 @@ async function buildBrainPrematch(
     finalPicks.push(pick);
   }
 
-  setCache(cacheKey, finalPicks, 600);
+  setCache(cacheKey, finalPicks, 1200);
   return finalPicks;
 }
 

@@ -66,6 +66,8 @@ type PhaseScope = {
 
 const BASE_URL = "https://v3.football.api-sports.io";
 
+const DEBUG_BRAIN_LIVE = false;
+
 const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE", "INT"]);
 
 const ALLOWED_LEAGUE_IDS = new Set<number>([
@@ -88,6 +90,28 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
 const HOT_MIN = 56;
 const DOM_MIN = 52;
 const INTERESTING_MIN = 30;
+
+/**
+ * Limiti anti-carico:
+ * - shortlist economica prima delle stats pesanti
+ * - massimo numero match su cui chiedere /fixtures/statistics
+ */
+const MAX_HEAVY_CANDIDATES = 10;
+
+/**
+ * TTL cache:
+ * un po' più larghi del tuo file attuale per evitare ricalcoli troppo frequenti
+ */
+const LIVE_FIXTURES_TTL_SEC = 12;
+const MATCH_STATS_TTL_SEC = 25;
+const FINAL_RESULT_TTL_SEC = 15;
+const HT_BASELINE_TTL_SEC = 7200;
+
+function logDebug(...args: any[]) {
+  if (DEBUG_BRAIN_LIVE) {
+    console.log(...args);
+  }
+}
 
 function apiKey(): string {
   const key = process.env.API_FOOTBALL_KEY;
@@ -126,7 +150,7 @@ async function getLiveFixtures(): Promise<any[]> {
   const raw = await apiGet("/fixtures", { live: "all" });
   const fixtures = Array.isArray(raw?.response) ? raw.response : [];
 
-  setCache(cacheKey, fixtures, 8);
+  setCache(cacheKey, fixtures, LIVE_FIXTURES_TTL_SEC);
   return fixtures;
 }
 
@@ -157,7 +181,7 @@ async function getMatchStats(fixtureId: number): Promise<BrainStatsPair | null> 
     away: awayMap,
   };
 
-  setCache(cacheKey, pair, 20);
+  setCache(cacheKey, pair, MATCH_STATS_TTL_SEC);
   return pair;
 }
 
@@ -270,12 +294,52 @@ function isUsefulLiveFixture(f: any): boolean {
   const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
 
   if (!LIVE_STATUSES.has(status)) return false;
-  if (elapsed < 10) return false;
-  if (elapsed > 80) return false;
+  if (elapsed < 15) return false;
+  if (elapsed > 78) return false;
   if (!isAllowedLeague(f)) return false;
   if (isYouthOrReserveFixture(f)) return false;
 
   return true;
+}
+
+function getLightCandidateScore(f: any): number {
+  const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
+  const homeGoals = Number(f?.goals?.home ?? 0);
+  const awayGoals = Number(f?.goals?.away ?? 0);
+  const totalGoals = homeGoals + awayGoals;
+  const goalDiff = Math.abs(homeGoals - awayGoals);
+  const leagueId = Number(f?.league?.id ?? 0);
+
+  let score = 0;
+
+  // Preferisci finestre in cui un match può ancora "accendersi"
+  if (elapsed >= 18 && elapsed <= 40) score += 16;
+  if (elapsed >= 46 && elapsed <= 70) score += 20;
+  if (elapsed > 70 && elapsed <= 78) score += 6;
+
+  // Preferisci scoreline vive ma non "morte"
+  if (
+    (homeGoals === 0 && awayGoals === 0) ||
+    (homeGoals === 1 && awayGoals === 0) ||
+    (homeGoals === 0 && awayGoals === 1) ||
+    (homeGoals === 1 && awayGoals === 1)
+  ) {
+    score += 24;
+  } else if (totalGoals <= 3 && goalDiff <= 1) {
+    score += 12;
+  } else if (goalDiff >= 2) {
+    score -= 12;
+  }
+
+  // Premi un po' le leghe top assolute
+  if ([39, 140, 135, 78, 61, 2, 3].includes(leagueId)) {
+    score += 8;
+  }
+
+  // Piccolo premio ai match equilibrati
+  if (goalDiff === 0) score += 6;
+
+  return score;
 }
 
 function sum(a?: number, b?: number): number {
@@ -324,8 +388,8 @@ function saveHalfTimeBaseline(fixtureId: number, stats: BrainStatsPair): void {
 
   if (already) return;
 
-  setCache(cacheKey, stats, 7200);
-  console.log("[brainLive] HT BASELINE SAVED for fixture", fixtureId);
+  setCache(cacheKey, stats, HT_BASELINE_TTL_SEC);
+  logDebug("[brainLive] HT BASELINE SAVED for fixture", fixtureId);
 }
 
 function getPhaseScope(
@@ -369,7 +433,7 @@ function getPhaseScope(
       };
     }
 
-    console.log(
+    logDebug(
       "[brainLive] WARNING no HT baseline for fixture",
       fixtureId,
       "- fallback to cumulative stats"
@@ -403,9 +467,9 @@ function buildPick(f: any, cumulativeStats: BrainStatsPair): BrainLivePick | nul
   const goalDiff = Math.abs(homeGoals - awayGoals);
 
   const interestingScorelineOk =
-  homeGoals <= 1 &&
-  awayGoals <= 1 &&
-  goalDiff <= 1;
+    homeGoals <= 1 &&
+    awayGoals <= 1 &&
+    goalDiff <= 1;
 
   const homeName = String(f?.teams?.home?.name ?? "Unknown Home");
   const awayName = String(f?.teams?.away?.name ?? "Unknown Away");
@@ -496,11 +560,11 @@ function buildPick(f: any, cumulativeStats: BrainStatsPair): BrainLivePick | nul
   }
 
   let homeInterestingScore = 0;
-const homeInterestingAllowed =
-  inScoringWindow &&
-  interestingScorelineOk &&
-  phaseElapsed >= (phase === "firstHalf" ? 20 : 5) &&
-  homeDomScore < DOM_MIN;
+  const homeInterestingAllowed =
+    inScoringWindow &&
+    interestingScorelineOk &&
+    phaseElapsed >= (phase === "firstHalf" ? 20 : 5) &&
+    homeDomScore < DOM_MIN;
 
   if (homeInterestingAllowed) {
     homeInterestingScore += scale(shotsHome, 5, 12, 0, 26);
@@ -521,11 +585,11 @@ const homeInterestingAllowed =
   }
 
   let awayInterestingScore = 0;
-const awayInterestingAllowed =
-  inScoringWindow &&
-  interestingScorelineOk &&
-  phaseElapsed >= (phase === "firstHalf" ? 20 : 5) &&
-  awayDomScore < DOM_MIN;
+  const awayInterestingAllowed =
+    inScoringWindow &&
+    interestingScorelineOk &&
+    phaseElapsed >= (phase === "firstHalf" ? 20 : 5) &&
+    awayDomScore < DOM_MIN;
 
   if (awayInterestingAllowed) {
     awayInterestingScore += scale(shotsAway, 5, 12, 0, 26);
@@ -551,7 +615,7 @@ const awayInterestingAllowed =
   homeInterestingScore = clamp(homeInterestingScore, 0, 100);
   awayInterestingScore = clamp(awayInterestingScore, 0, 100);
 
-  console.log(
+  logDebug(
     "[brainLive][scores]",
     homeName,
     "vs",
@@ -686,103 +750,77 @@ const awayInterestingAllowed =
   };
 }
 
+function dedupeByFixture(fixtures: any[]): any[] {
+  const seen = new Set<number>();
+  const result: any[] = [];
+
+  for (const f of fixtures) {
+    const fixtureId = Number(f?.fixture?.id ?? 0);
+    if (!fixtureId) continue;
+    if (seen.has(fixtureId)) continue;
+    seen.add(fixtureId);
+    result.push(f);
+  }
+
+  return result;
+}
+
 async function buildBrainLive(
   maxResults: number = 8
 ): Promise<{ hot: BrainLivePick | null; others: BrainLivePick[] }> {
-  const cacheKey = `brainLive_v2_${maxResults}`;
+  const cacheKey = `brainLive_v3_light_${maxResults}`;
   const cached = getCache<{ hot: BrainLivePick | null; others: BrainLivePick[] }>(cacheKey);
 
   if (cached) {
-    console.log("[brainLive] CACHE HIT");
+    markCacheHit();
     return cached;
   }
 
-  console.log("[brainLive] START");
+  markCacheMiss();
+
+  const startedAt = Date.now();
 
   const fixtures = await getLiveFixtures();
-  console.log("[brainLive] live fixtures total =", fixtures.length);
+  const filtered = fixtures.filter(isUsefulLiveFixture);
 
-  const candidates = fixtures.filter(isUsefulLiveFixture);
-  console.log("[brainLive] candidates after filters =", candidates.length);
-
-  for (const f of candidates) {
-    console.log(
-      "[brainLive] CANDIDATE",
-      f?.league?.country,
-      "|",
-      f?.league?.name,
-      "|",
-      f?.teams?.home?.name,
-      "vs",
-      f?.teams?.away?.name,
-      "| minute:",
-      f?.fixture?.status?.elapsed,
-      "| score:",
-      `${Number(f?.goals?.home ?? 0)}-${Number(f?.goals?.away ?? 0)}`
-    );
-  }
+  // Screening leggero: prendi tutti i live utili, ma ordina con score cheap
+  const preRanked = dedupeByFixture(filtered)
+    .map((f) => ({
+      fixture: f,
+      lightScore: getLightCandidateScore(f),
+    }))
+    .sort((a, b) => b.lightScore - a.lightScore)
+    .slice(0, MAX_HEAVY_CANDIDATES)
+    .map((x) => x.fixture);
 
   const picks: BrainLivePick[] = [];
 
-  for (const f of candidates) {
+  let statsFetched = 0;
+  let statsMissed = 0;
+
+  for (const f of preRanked) {
     const fixtureId = Number(f?.fixture?.id ?? 0);
     if (!fixtureId) continue;
-
-    const homeName = String(f?.teams?.home?.name ?? "Unknown Home");
-    const awayName = String(f?.teams?.away?.name ?? "Unknown Away");
-    const leagueName = String(f?.league?.name ?? "Unknown League");
-    const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
-    const score = `${Number(f?.goals?.home ?? 0)}-${Number(f?.goals?.away ?? 0)}`;
 
     try {
       const stats = await getMatchStats(fixtureId);
 
       if (!stats) {
-        console.log("[brainLive] NO STATS", homeName, "vs", awayName);
+        statsMissed += 1;
         continue;
       }
+
+      statsFetched += 1;
 
       const pick = buildPick(f, stats);
-
-      if (!pick) {
-        console.log(
-          "[brainLive] SKIPPED",
-          homeName,
-          "vs",
-          awayName,
-          "|",
-          leagueName,
-          "| minute:",
-          elapsed,
-          "| score:",
-          score
-        );
-        continue;
+      if (pick) {
+        picks.push(pick);
       }
-
-      console.log(
-        "[brainLive] PICK",
-        homeName,
-        "vs",
-        awayName,
-        "|",
-        pick.tagType,
-        "| score:",
-        pick.finalScore,
-        "| phase:",
-        pick.phase,
-        "| phaseMinute:",
-        pick.phaseElapsed
-      );
-
-      picks.push(pick);
-    } catch (err) {
-      console.log("[brainLive] ERROR", homeName, "vs", awayName, err);
+    } catch {
+      statsMissed += 1;
       continue;
     }
   }
-
-  console.log("[brainLive] TOTAL PICKS =", picks.length);
 
   picks.sort((a, b) => b.finalScore - a.finalScore);
 
@@ -801,17 +839,17 @@ async function buildBrainLive(
     others.push(p);
   }
 
-  console.log(
-    "[brainLive] RESULT => hot:",
-    hot ? `${hot.home.name} vs ${hot.away.name}` : "none",
-    "| others:",
-    others.length
-  );
-
   const result = { hot, others };
-  setCache(cacheKey, result, 8);
+
+  setCache(cacheKey, result, FINAL_RESULT_TTL_SEC);
+
+  const totalMs = Date.now() - startedAt;
+  console.log(
+    `[brainLive] done in ${totalMs}ms | liveTotal=${fixtures.length} | filtered=${filtered.length} | shortlist=${preRanked.length} | statsFetched=${statsFetched} | statsMissed=${statsMissed} | picks=${picks.length}`
+  );
 
   return result;
 }
 
 export { buildBrainLive };
+export default buildBrainLive;
