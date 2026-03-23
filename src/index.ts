@@ -13,6 +13,7 @@ import { cacheSize } from "./cache";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
 import brainLiveRouter from "./routes/brainLive";
+import * as brainLiveModule from "./brainLive";
 
 dotenv.config();
 
@@ -330,6 +331,7 @@ app.use("/api/league/fixtures", leagueFixturesRouter);
 app.use("/api/brain", brainPrematchRouter);
 app.use("/api/brain", brainLiveRouter);
 console.log("Mounted brainLiveRouter on /api/brain");
+
 // ===============================
 // SSE stream
 // ===============================
@@ -392,6 +394,9 @@ const PORT = Number(process.env.PORT) || 3000;
 if (process.env.ENABLE_POLLER !== "false") {
   startPoller();
 }
+console.log("brainLive exports:", Object.keys(brainLiveModule));
+brainLiveModule.startBrainLivePoller(8);
+brainLiveModule.startBrainLivePoller(8);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

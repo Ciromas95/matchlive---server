@@ -64,6 +64,11 @@ type PhaseScope = {
   hasSecondHalfBaseline: boolean;
 };
 
+type BrainLiveResult = {
+  hot: BrainLivePick | null;
+  others: BrainLivePick[];
+};
+
 const BASE_URL = "https://v3.football.api-sports.io";
 
 const DEBUG_BRAIN_LIVE = false;
@@ -90,22 +95,15 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
 const HOT_MIN = 56;
 const DOM_MIN = 52;
 const INTERESTING_MIN = 30;
-
-/**
- * Limiti anti-carico:
- * - shortlist economica prima delle stats pesanti
- * - massimo numero match su cui chiedere /fixtures/statistics
- */
 const MAX_HEAVY_CANDIDATES = 10;
 
-/**
- * TTL cache:
- * un po' più larghi del tuo file attuale per evitare ricalcoli troppo frequenti
- */
 const LIVE_FIXTURES_TTL_SEC = 12;
 const MATCH_STATS_TTL_SEC = 25;
 const FINAL_RESULT_TTL_SEC = 15;
 const HT_BASELINE_TTL_SEC = 7200;
+
+const PRECOMPUTED_CACHE_TTL_SEC = 40;
+const BRAIN_LIVE_POLL_INTERVAL_MS = 25_000;
 
 function logDebug(...args: any[]) {
   if (DEBUG_BRAIN_LIVE) {
@@ -312,12 +310,10 @@ function getLightCandidateScore(f: any): number {
 
   let score = 0;
 
-  // Preferisci finestre in cui un match può ancora "accendersi"
   if (elapsed >= 18 && elapsed <= 40) score += 16;
   if (elapsed >= 46 && elapsed <= 70) score += 20;
   if (elapsed > 70 && elapsed <= 78) score += 6;
 
-  // Preferisci scoreline vive ma non "morte"
   if (
     (homeGoals === 0 && awayGoals === 0) ||
     (homeGoals === 1 && awayGoals === 0) ||
@@ -331,12 +327,10 @@ function getLightCandidateScore(f: any): number {
     score -= 12;
   }
 
-  // Premi un po' le leghe top assolute
   if ([39, 140, 135, 78, 61, 2, 3].includes(leagueId)) {
     score += 8;
   }
 
-  // Piccolo premio ai match equilibrati
   if (goalDiff === 0) score += 6;
 
   return score;
@@ -765,11 +759,17 @@ function dedupeByFixture(fixtures: any[]): any[] {
   return result;
 }
 
-async function buildBrainLive(
-  maxResults: number = 8
-): Promise<{ hot: BrainLivePick | null; others: BrainLivePick[] }> {
+function getPrecomputedCacheKey(maxResults: number): string {
+  return `brainLive_precomputed_${maxResults}`;
+}
+
+function getBrainLiveFromCache(maxResults: number): BrainLiveResult | null {
+  return getCache<BrainLiveResult>(getPrecomputedCacheKey(maxResults));
+}
+
+async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> {
   const cacheKey = `brainLive_v3_light_${maxResults}`;
-  const cached = getCache<{ hot: BrainLivePick | null; others: BrainLivePick[] }>(cacheKey);
+  const cached = getCache<BrainLiveResult>(cacheKey);
 
   if (cached) {
     markCacheHit();
@@ -783,7 +783,6 @@ async function buildBrainLive(
   const fixtures = await getLiveFixtures();
   const filtered = fixtures.filter(isUsefulLiveFixture);
 
-  // Screening leggero: prendi tutti i live utili, ma ordina con score cheap
   const preRanked = dedupeByFixture(filtered)
     .map((f) => ({
       fixture: f,
@@ -839,7 +838,7 @@ async function buildBrainLive(
     others.push(p);
   }
 
-  const result = { hot, others };
+  const result: BrainLiveResult = { hot, others };
 
   setCache(cacheKey, result, FINAL_RESULT_TTL_SEC);
 
@@ -851,5 +850,64 @@ async function buildBrainLive(
   return result;
 }
 
-export { buildBrainLive };
+async function refreshBrainLiveCache(maxResults: number = 8): Promise<BrainLiveResult> {
+  const result = await buildBrainLive(maxResults);
+  setCache(getPrecomputedCacheKey(maxResults), result, PRECOMPUTED_CACHE_TTL_SEC);
+  return result;
+}
+
+function getDefaultBrainLivePayload(_maxResults: number = 8): BrainLiveResult {
+  return {
+    hot: null,
+    others: [],
+  };
+}
+
+let brainLivePollerStarted = false;
+let brainLivePollerBusy = false;
+
+function startBrainLivePoller(maxResults: number = 8): void {
+  if (brainLivePollerStarted) {
+    console.log("[brainLive] poller already started");
+    return;
+  }
+
+  brainLivePollerStarted = true;
+
+  const run = async () => {
+    if (brainLivePollerBusy) {
+      console.log("[brainLive] poller skipped: previous run still in progress");
+      return;
+    }
+
+    brainLivePollerBusy = true;
+
+    try {
+      await refreshBrainLiveCache(maxResults);
+    } catch (e: any) {
+      console.error(
+        "[brainLive] poller refresh error:",
+        e?.response?.data ?? e?.message ?? e
+      );
+    } finally {
+      brainLivePollerBusy = false;
+    }
+  };
+
+  run();
+  setInterval(run, BRAIN_LIVE_POLL_INTERVAL_MS);
+
+  console.log(
+    `[brainLive] poller started | intervalMs=${BRAIN_LIVE_POLL_INTERVAL_MS} | maxResults=${maxResults}`
+  );
+}
+console.log("[brainLive.ts] extended module loaded");
+export {
+  buildBrainLive,
+  refreshBrainLiveCache,
+  getBrainLiveFromCache,
+  getDefaultBrainLivePayload,
+  startBrainLivePoller,
+};
+
 export default buildBrainLive;
