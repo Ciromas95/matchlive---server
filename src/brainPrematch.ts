@@ -513,49 +513,140 @@ function buildH2HStats(raw: any, homeTeamId: number, awayTeamId: number, last: n
     over25Rate: over25 / count,
   };
 }
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function avg(values: number[]): number {
+  if (!values.length) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function round1(n: number): number {
+  return Number(n.toFixed(1));
+}
+
+function round2(n: number): number {
+  return Number(n.toFixed(2));
+}
+
 function buildServerPreAnalysis(
   homeHome: TeamSplitStats,
   awayAway: TeamSplitStats,
   homeRecent: TeamSplitStats,
-  awayRecent: TeamSplitStats
+  awayRecent: TeamSplitStats,
+  h2h: H2HStats
 ): { preScore: number; candidateBet: string | null } {
-  const goalLean =
-    homeHome.bttsRate * 22 +
-    awayAway.bttsRate * 22 +
-    homeRecent.bttsRate * 14 +
-    awayRecent.bttsRate * 14 +
-    Math.min(homeHome.avgGoalsFor, 2.2) * 7 +
-    Math.min(awayAway.avgGoalsFor, 2.2) * 7 +
-    Math.min(homeHome.avgGoalsAgainst, 2.0) * 7 +
-    Math.min(awayAway.avgGoalsAgainst, 2.0) * 7;
+  const splitAvgGoals = avg([
+    homeHome.avgTotalGoals,
+    awayAway.avgTotalGoals,
+  ]);
 
-  const overLean =
-    homeHome.over25Rate * 20 +
-    awayAway.over25Rate * 20 +
-    homeRecent.over25Rate * 14 +
-    awayRecent.over25Rate * 14 +
-    Math.min(homeHome.avgTotalGoals, 4.0) * 8 +
-    Math.min(awayAway.avgTotalGoals, 4.0) * 8 +
-    Math.min(homeRecent.avgTotalGoals, 4.0) * 8 +
-    Math.min(awayRecent.avgTotalGoals, 4.0) * 8;
+  const recentAvgGoals = avg([
+    homeRecent.avgTotalGoals,
+    awayRecent.avgTotalGoals,
+  ]);
 
-  if (goalLean >= overLean && goalLean >= 58) {
+  const h2hAvgGoals = h2h.matches >= 2 ? h2h.avgTotalGoals : 0;
+
+  const overSupportRate = avg([
+    homeHome.over25Rate,
+    awayAway.over25Rate,
+    homeRecent.over25Rate,
+    awayRecent.over25Rate,
+  ]);
+
+  const goalSupportRate = avg([
+    homeHome.bttsRate,
+    awayAway.bttsRate,
+    homeRecent.bttsRate,
+    awayRecent.bttsRate,
+  ]);
+
+  // Quanta probabilità c'è che entrambe segnino
+  const homeGoalIndex = avg([
+    homeHome.avgGoalsFor,
+    awayAway.avgGoalsAgainst,
+  ]);
+
+  const awayGoalIndex = avg([
+    awayAway.avgGoalsFor,
+    homeHome.avgGoalsAgainst,
+  ]);
+
+  // Stima gol attesi del match
+  let expectedGoals =
+    splitAvgGoals * 0.60 +
+    recentAvgGoals * 0.25;
+
+  if (h2h.matches >= 2) {
+    expectedGoals += h2hAvgGoals * 0.15;
+  }
+
+  // Score OVER
+  let overScore = 0;
+  overScore += clamp(expectedGoals, 0, 4) * 18;
+  overScore += overSupportRate * 28;
+
+  if (h2h.matches >= 2) {
+    overScore += h2h.over25Rate * 14;
+    overScore += clamp(h2hAvgGoals, 0, 4) * 6;
+  }
+
+  // Score GOAL
+  let goalScore = 0;
+  goalScore += clamp(homeGoalIndex, 0, 2.5) * 18;
+  goalScore += clamp(awayGoalIndex, 0, 2.5) * 18;
+  goalScore += goalSupportRate * 26;
+
+  if (h2h.matches >= 2) {
+    goalScore += h2h.bttsRate * 12;
+    goalScore += clamp(h2hAvgGoals, 0, 4) * 4;
+  }
+
+  const overCandidate =
+    expectedGoals >= 2.70 &&
+    overSupportRate >= 0.50 &&
+    overScore >= 62;
+
+  const goalCandidate =
+    homeGoalIndex >= 1.05 &&
+    awayGoalIndex >= 1.05 &&
+    goalSupportRate >= 0.52 &&
+    goalScore >= 62;
+
+  if (!overCandidate && !goalCandidate) {
     return {
-      preScore: Number(goalLean.toFixed(1)),
+      preScore: round1(Math.max(overScore, goalScore)),
+      candidateBet: null,
+    };
+  }
+
+  if (overCandidate && !goalCandidate) {
+    return {
+      preScore: round1(overScore),
+      candidateBet: "OVER 2.5",
+    };
+  }
+
+  if (!overCandidate && goalCandidate) {
+    return {
+      preScore: round1(goalScore),
       candidateBet: "GOAL",
     };
   }
 
-  if (overLean > goalLean && overLean >= 58) {
+  // Se entrambe sono candidate, scegli quella con score più alto
+  if (overScore >= goalScore) {
     return {
-      preScore: Number(overLean.toFixed(1)),
+      preScore: round1(overScore),
       candidateBet: "OVER 2.5",
     };
   }
 
   return {
-    preScore: Number(Math.max(goalLean, overLean).toFixed(1)),
-    candidateBet: null,
+    preScore: round1(goalScore),
+    candidateBet: "GOAL",
   };
 }
 
@@ -604,154 +695,110 @@ function buildPrematchPick(
   const homeName = f?.teams?.home?.name ?? null;
   const awayName = f?.teams?.away?.name ?? null;
 
-  // BLOCCO 1: casa/trasferta
-  const splitGoalScore =
-    homeHome.bttsRate * 22 +
-    awayAway.bttsRate * 22 +
-    Math.min(homeHome.avgGoalsFor, 2.5) * 8 +
-    Math.min(awayAway.avgGoalsFor, 2.5) * 8 +
-    Math.min(homeHome.avgGoalsAgainst, 2.2) * 7 +
-    Math.min(awayAway.avgGoalsAgainst, 2.2) * 7;
+  const splitAvgGoals = avg([
+    homeHome.avgTotalGoals,
+    awayAway.avgTotalGoals,
+  ]);
 
-  const splitOverScore =
-    homeHome.over25Rate * 24 +
-    awayAway.over25Rate * 24 +
-    Math.min(homeHome.avgTotalGoals, 4.0) * 9 +
-    Math.min(awayAway.avgTotalGoals, 4.0) * 9;
+  const recentAvgGoals = avg([
+    homeRecent.avgTotalGoals,
+    awayRecent.avgTotalGoals,
+  ]);
 
-  // BLOCCO 2: forma recente
-  const recentGoalScore =
-    homeRecent.bttsRate * 16 +
-    awayRecent.bttsRate * 16 +
-    Math.min(homeRecent.avgGoalsFor, 2.4) * 6 +
-    Math.min(awayRecent.avgGoalsFor, 2.4) * 6 +
-    Math.min(homeRecent.avgGoalsAgainst, 2.2) * 5 +
-    Math.min(awayRecent.avgGoalsAgainst, 2.2) * 5;
+  const h2hAvgGoals = h2h.matches >= 2 ? h2h.avgTotalGoals : 0;
 
-  const recentOverScore =
-    homeRecent.over25Rate * 18 +
-    awayRecent.over25Rate * 18 +
-    Math.min(homeRecent.avgTotalGoals, 4.0) * 7 +
-    Math.min(awayRecent.avgTotalGoals, 4.0) * 7;
+  const expectedGoals =
+    splitAvgGoals * 0.60 +
+    recentAvgGoals * 0.25 +
+    (h2h.matches >= 2 ? h2hAvgGoals * 0.15 : 0);
 
-  // BLOCCO 3: H2H
-  const h2hGoalScore =
-    h2h.matches > 0
-      ? h2h.bttsRate * 16 + Math.min(h2h.avgTotalGoals, 4.0) * 5
-      : 0;
+  const homeGoalIndex = avg([
+    homeHome.avgGoalsFor,
+    awayAway.avgGoalsAgainst,
+  ]);
 
-  const h2hOverScore =
-    h2h.matches > 0
-      ? h2h.over25Rate * 16 + Math.min(h2h.avgTotalGoals, 4.0) * 6
-      : 0;
+  const awayGoalIndex = avg([
+    awayAway.avgGoalsFor,
+    homeHome.avgGoalsAgainst,
+  ]);
 
-  const goalScore = splitGoalScore + recentGoalScore + h2hGoalScore;
-  const overScore = splitOverScore + recentOverScore + h2hOverScore;
+  const overSupportRate = avg([
+    homeHome.over25Rate,
+    awayAway.over25Rate,
+    homeRecent.over25Rate,
+    awayRecent.over25Rate,
+  ]);
 
-  let recommendedBet: string | null = null;
-  let rawScore = 0;
+  const goalSupportRate = avg([
+    homeHome.bttsRate,
+    awayAway.bttsRate,
+    homeRecent.bttsRate,
+    awayRecent.bttsRate,
+  ]);
 
-  if (candidateBet === "GOAL") {
-    recommendedBet = goalScore >= overScore ? "GOAL" : "OVER 2.5";
-    rawScore = Math.max(goalScore, overScore);
-  } else if (candidateBet === "OVER 2.5") {
+  let overScore = 0;
+  overScore += clamp(expectedGoals, 0, 4) * 18;
+  overScore += overSupportRate * 28;
+  if (h2h.matches >= 2) {
+    overScore += h2h.over25Rate * 14;
+    overScore += clamp(h2hAvgGoals, 0, 4) * 6;
+  }
+
+  let goalScore = 0;
+  goalScore += clamp(homeGoalIndex, 0, 2.5) * 18;
+  goalScore += clamp(awayGoalIndex, 0, 2.5) * 18;
+  goalScore += goalSupportRate * 26;
+  if (h2h.matches >= 2) {
+    goalScore += h2h.bttsRate * 12;
+    goalScore += clamp(h2hAvgGoals, 0, 4) * 4;
+  }
+
+  let recommendedBet: string;
+  let rawScore: number;
+
+  if (candidateBet === "OVER 2.5") {
     recommendedBet = overScore >= goalScore ? "OVER 2.5" : "GOAL";
+    rawScore = Math.max(overScore, goalScore);
+  } else if (candidateBet === "GOAL") {
+    recommendedBet = goalScore >= overScore ? "GOAL" : "OVER 2.5";
     rawScore = Math.max(goalScore, overScore);
   } else {
-    recommendedBet = goalScore >= overScore ? "GOAL" : "OVER 2.5";
-    rawScore = Math.max(goalScore, overScore);
+    recommendedBet = overScore >= goalScore ? "OVER 2.5" : "GOAL";
+    rawScore = Math.max(overScore, goalScore);
   }
 
   const competitionWeight = getCompetitionWeight(f);
+  const normalizedScore = clamp((rawScore * 0.92) * competitionWeight, 0, 100);
 
-  const normalizedScore = Math.max(
-    0,
-    Math.min(100, (45 + rawScore * 0.42) * competitionWeight)
-  );
+  let confidence = 0.48;
+  confidence += clamp(normalizedScore / 100, 0, 1) * 0.24;
+  confidence += clamp(Math.abs(overScore - goalScore) / 25, 0, 1) * 0.08;
 
-  let confidence = 0.50 * competitionWeight;
+  if (homeHome.matches >= 4 && awayAway.matches >= 4) confidence += 0.05;
+  if (homeRecent.matches >= 4 && awayRecent.matches >= 4) confidence += 0.04;
+  if (h2h.matches >= 3) confidence += 0.03;
 
-  const alignedSignals = [
-    homeHome.matches >= 4 && awayAway.matches >= 4,
-    homeRecent.matches >= 4 && awayRecent.matches >= 4,
-    h2h.matches >= 2,
-    recommendedBet === "GOAL"
-      ? (homeHome.bttsRate + awayAway.bttsRate + homeRecent.bttsRate + awayRecent.bttsRate) / 4 >= 0.55
-      : (homeHome.over25Rate + awayAway.over25Rate + homeRecent.over25Rate + awayRecent.over25Rate) / 4 >= 0.55,
-  ].filter(Boolean).length;
+  confidence *= competitionWeight >= 0.99 ? 1.0 : 0.97;
+  confidence = clamp(confidence, 0.50, 0.90);
 
-  confidence += Math.min(normalizedScore / 100, 0.30);
-
-  if (alignedSignals >= 4) confidence += 0.10;
-  else if (alignedSignals === 3) confidence += 0.07;
-  else if (alignedSignals === 2) confidence += 0.04;
-
-  if (h2h.matches > 0) {
-    if (recommendedBet === "GOAL" && h2h.bttsRate >= 0.60) confidence += 0.04;
-    if (recommendedBet === "OVER 2.5" && h2h.over25Rate >= 0.60) confidence += 0.04;
+  // Filtri finali duri
+  if (recommendedBet === "OVER 2.5") {
+    if (expectedGoals < 2.70) return null;
+    if (overSupportRate < 0.50) return null;
   }
-
-    const minConfidenceFloor = competitionWeight >= 0.99 ? 0.45 : 0.42;
-    const maxConfidenceCap = competitionWeight >= 0.99 ? 0.92 : 0.88;
-
-  confidence = Math.max(
-    minConfidenceFloor,
-    Math.min(confidence, maxConfidenceCap)
-  );
-
-  const splitAvgGoals = ((homeHome.avgTotalGoals + awayAway.avgTotalGoals) / 2);
-  const recentAvgGoals = ((homeRecent.avgTotalGoals + awayRecent.avgTotalGoals) / 2);
-
-  const splitRecentGoalAgreement =
-    (
-      homeHome.bttsRate +
-      awayAway.bttsRate +
-      homeRecent.bttsRate +
-      awayRecent.bttsRate
-    ) / 4;
-
-  const splitRecentOverAgreement =
-    (
-      homeHome.over25Rate +
-      awayAway.over25Rate +
-      homeRecent.over25Rate +
-      awayRecent.over25Rate
-    ) / 4;
-
-  const bothTeamsScoringSignal =
-    homeHome.avgGoalsFor >= 1.0 &&
-    awayAway.avgGoalsFor >= 0.95;
-
-  const bothTeamsConcedingSignal =
-    homeHome.avgGoalsAgainst >= 0.8 &&
-    awayAway.avgGoalsAgainst >= 0.8;
-
-  const recentOpenMatchSignal =
-    homeRecent.avgTotalGoals >= 2.2 &&
-    awayRecent.avgTotalGoals >= 2.2;
-
-  const overVolumeSignal =
-    homeHome.avgTotalGoals >= 2.4 &&
-    awayAway.avgTotalGoals >= 2.4 &&
-    recentAvgGoals >= 2.35;
-
-  const h2hGoalSupport =
-    h2h.matches === 0 || h2h.bttsRate >= 0.40 || h2h.avgTotalGoals >= 2.4;
-
-  const h2hOverSupport =
-    h2h.matches === 0 || h2h.over25Rate >= 0.40 || h2h.avgTotalGoals >= 2.6;
 
   if (recommendedBet === "GOAL") {
-    if (!bothTeamsScoringSignal) return null;
-    if (!bothTeamsConcedingSignal) return null;
-    if (splitRecentGoalAgreement < 0.52) return null;
-    if (!recentOpenMatchSignal && !h2hGoalSupport) return null;
-  }
+    if (homeGoalIndex < 1.05 || awayGoalIndex < 1.05) return null;
+    if (goalSupportRate < 0.52) return null;
 
-  if (recommendedBet === "OVER 2.5") {
-    if (!overVolumeSignal) return null;
-    if (splitRecentOverAgreement < 0.50) return null;
-    if (!h2hOverSupport && recentAvgGoals < 2.5) return null;
+    // Se H2H è buono, può spingere GOAL con più fiducia
+    if (h2h.matches >= 2) {
+      const goodH2HForGoal =
+        h2h.bttsRate >= 0.40 || h2hAvgGoals >= 2.8;
+      if (!goodH2HForGoal && goalSupportRate < 0.57) {
+        return null;
+      }
+    }
   }
 
   if (normalizedScore < MIN_PICK_SCORE || confidence < MIN_CONFIDENCE) {
@@ -759,57 +806,50 @@ function buildPrematchPick(
   }
 
   const insightParts: string[] = [];
+
   insightParts.push(
-    `${homeName ?? "Casa"} in casa: ${homeHome.avgTotalGoals.toFixed(2)} gol medi`
+    `${homeName ?? "Casa"} in casa: ${round2(homeHome.avgTotalGoals)} gol medi`
   );
   insightParts.push(
-    `${awayName ?? "Ospite"} fuori: ${awayAway.avgTotalGoals.toFixed(2)} gol medi`
-  );
-  insightParts.push(
-    `forma recente combinata: ${recentAvgGoals.toFixed(2)}`
+    `${awayName ?? "Ospite"} fuori: ${round2(awayAway.avgTotalGoals)} gol medi`
   );
 
-  if (h2h.matches > 0) {
-    insightParts.push(`H2H ultimi ${h2h.matches}: ${h2h.avgTotalGoals.toFixed(2)} gol medi`);
+  if (h2h.matches >= 2) {
+    insightParts.push(
+      `H2H ultimi ${h2h.matches}: ${round2(h2hAvgGoals)} gol medi`
+    );
   }
+
+  insightParts.push(`stima match: ${round2(expectedGoals)} gol`);
 
   const insightLine = insightParts.join(" | ");
 
-  const reasonParts: string[] = [];
+  let reason = "";
 
-  if (recommendedBet === "GOAL") {
-    reasonParts.push(
-      `i dati casa/trasferta mostrano propensione al BTTS`
-    );
+  if (recommendedBet === "OVER 2.5") {
+    reason =
+      `La media combinata del match è da circa ${round2(expectedGoals)} gol. ` +
+      `${homeName ?? "Casa"} in casa viaggia a ${round2(homeHome.avgTotalGoals)} gol medi, ` +
+      `${awayName ?? "Ospite"} fuori casa a ${round2(awayAway.avgTotalGoals)}.`;
 
-    if (recentAvgGoals >= 2.2) {
-      reasonParts.push(`la forma recente conferma partite aperte`);
-    }
-
-    if (h2h.matches > 0 && h2h.bttsRate >= 0.50) {
-      reasonParts.push(`anche i precedenti tra le due squadre sono favorevoli`);
+    if (h2h.matches >= 2) {
+      reason +=
+        ` Anche i testa a testa recenti indicano una media di ${round2(h2hAvgGoals)} gol.`;
     }
   } else {
-    reasonParts.push(
-      `le medie gol casa/trasferta suggeriscono una gara da almeno 3 reti`
-    );
+    reason =
+      `Entrambe mostrano segnali da rete: indice gol casa ${round2(homeGoalIndex)}, ` +
+      `indice gol ospite ${round2(awayGoalIndex)}. ` +
+      `Il profilo BTTS complessivo è del ${(goalSupportRate * 100).toFixed(0)}%.`;
 
-    if (recentAvgGoals >= 2.4) {
-      reasonParts.push(`lo stato di forma recente sostiene l'OVER 2.5`);
-    }
-
-    if (h2h.matches > 0 && h2h.over25Rate >= 0.50) {
-      reasonParts.push(`gli H2H recenti rafforzano il pronostico`);
+    if (h2h.matches >= 2 && (h2h.bttsRate >= 0.40 || h2hAvgGoals >= 2.8)) {
+      reason +=
+        ` Anche i testa a testa recenti sostengono una gara da entrambe a segno.`;
     }
   }
 
-  let reason =
-    reasonParts.length > 0
-      ? `${reasonParts.join(", ")}.`
-      : "Statistiche recenti suggeriscono una partita da gol.";
-
   if (competitionWeight < 1) {
-    reason += " Competizione gestita con valutazione leggermente più prudente.";
+    reason += " Valutazione leggermente prudente per tipo di competizione.";
   }
 
   return {
@@ -835,8 +875,8 @@ function buildPrematchPick(
     recommendedBet,
     insightLine,
     reason,
-    confidence: Number(confidence.toFixed(2)),
-    score: Number(normalizedScore.toFixed(1)),
+    confidence: round2(confidence),
+    score: round1(normalizedScore),
   };
 }
 
@@ -847,7 +887,7 @@ async function buildBrainPrematch(
   picks: PrematchPick[];
   candidates: PrematchCandidate[];
 }> {
-  const cacheKey = `brainPrematch_v6_top_eu_only_${date}_${maxMatches}`;
+  const cacheKey = `brainPrematch_v7_avg_goals_logic_${date}_${maxMatches}`;
 
 const cached = getCache<{
   picks: PrematchPick[];
@@ -907,19 +947,21 @@ try {
     continue;
   }
 
+  const h2hRaw = await getHeadToHeadLocal(homeId, awayId).catch(() => null);
+  const h2h = buildH2HStats(h2hRaw, homeId, awayId, 5);
+
   const preAnalysis = buildServerPreAnalysis(
     homeHome,
     awayAway,
     homeRecent,
-    awayRecent
+    awayRecent,
+    h2h
   );
 
   if (!preAnalysis.candidateBet || preAnalysis.preScore < 58) {
     continue;
   }
 
-  const h2hRaw = await getHeadToHeadLocal(homeId, awayId).catch(() => null);
-  const h2h = buildH2HStats(h2hRaw, homeId, awayId, 5);
 
 const candidate = buildPrematchCandidate(
   f,
