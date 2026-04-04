@@ -15,17 +15,21 @@ brainLiveRouter.get("/live", async (req: Request, res: Response) => {
 
     const cached = getBrainLiveFromCache(maxResults);
     const fallback = getDefaultBrainLivePayload(maxResults);
-    const result = cached ?? fallback;
+    const rawResult: any = cached ?? fallback;
+
+    const candidates = Array.isArray(rawResult?.candidates)
+      ? rawResult.candidates
+      : [];
 
     return res.json({
       updatedAt: new Date().toISOString(),
       cached: Boolean(cached),
-      results: result.candidates.length,
+      results: candidates.length,
 
-      // nuovo payload reale
-      candidates: result.candidates,
+      // nuovo payload
+      candidates,
 
-      // campi legacy per non rompere subito il parser attuale dell'app
+      // legacy safe
       hot: null,
       others: [],
     });

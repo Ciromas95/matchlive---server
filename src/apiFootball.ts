@@ -103,6 +103,51 @@ export async function getFixtureEventsCached(
   return data;
 }
 
+export async function getFixturesByDate(
+  date: string,
+  type: CounterKey = "brainPrematch"
+): Promise<any> {
+  const cacheKey = `fixturesByDate_${date}`;
+
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+
+  markCacheMiss();
+
+  const data = await apiGet("/fixtures", type, { date });
+
+  setCache(cacheKey, data, 600);
+  return data;
+}
+
+export async function getTeamLastFixtures(
+  teamId: number,
+  last: number = 10,
+  type: CounterKey = "brainPrematch"
+): Promise<any> {
+  const safeLast = Math.max(1, Math.min(last, 10));
+  const cacheKey = `teamLastFixtures_${teamId}_${safeLast}`;
+
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+
+  markCacheMiss();
+
+  const data = await apiGet("/fixtures", type, {
+    team: teamId,
+    last: safeLast,
+  });
+
+  setCache(cacheKey, data, 6 * 60 * 60);
+  return data;
+}
+
 export async function getPlayersByTeam(teamId: number, season: number): Promise<any> {
   const cacheKey = `players_team_${teamId}_season_${season}`;
 
@@ -143,3 +188,14 @@ export async function getPlayersByTeam(teamId: number, season: number): Promise<
   setCache(cacheKey, merged, 12 * 60 * 60);
   return merged;
 }
+
+const apiFootball = {
+  getLiveFixtures,
+  getLeagueFixturesByDate,
+  getFixtureEventsCached,
+  getFixturesByDate,
+  getTeamLastFixtures,
+  getPlayersByTeam,
+};
+
+export default apiFootball;

@@ -1,6 +1,6 @@
-import axios from "axios";
 import { getCache, setCache } from "./cache";
-import { markApiCall, markCacheHit, markCacheMiss } from "./stats";
+import { markCacheHit, markCacheMiss } from "./stats";
+import { getLiveFixtures } from "./apiFootball";
 
 type BrainLiveCandidate = {
   fixtureId: number;
@@ -33,8 +33,6 @@ type BrainLiveResult = {
   candidates: BrainLiveCandidate[];
 };
 
-const BASE_URL = "https://v3.football.api-sports.io";
-
 const DEBUG_BRAIN_LIVE = false;
 
 const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE", "INT"]);
@@ -56,57 +54,28 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
   207, // Switzerland Super League
 ]);
 
-const LIVE_FIXTURES_TTL_SEC = 12;
-const FINAL_RESULT_TTL_SEC = 15;
+/**
+ * Cache leggera risultato finale candidati.
+ * Non cache dei fixtures live: quella ormai è condivisa in apiFootball.ts
+ */
+const FINAL_RESULT_TTL_SEC = 20;
 
-const PRECOMPUTED_CACHE_TTL_SEC = 40;
-const BRAIN_LIVE_POLL_INTERVAL_MS = 25_000;
+/**
+ * Cache precomputata che l’endpoint può servire subito.
+ * La teniamo un po’ più lunga del final cache.
+ */
+const PRECOMPUTED_CACHE_TTL_SEC = 35;
+
+/**
+ * Poller leggermente più lento:
+ * tanto i fixtures live sono già cachati globalmente.
+ */
+const BRAIN_LIVE_POLL_INTERVAL_MS = 30_000;
 
 function logDebug(...args: any[]) {
   if (DEBUG_BRAIN_LIVE) {
     console.log(...args);
   }
-}
-
-function apiKey(): string {
-  const key = process.env.API_FOOTBALL_KEY;
-  if (!key) {
-    throw new Error("Missing API_FOOTBALL_KEY in .env");
-  }
-  return key;
-}
-
-async function apiGet(path: string, params?: Record<string, any>): Promise<any> {
-  markApiCall("brainLive");
-
-  const res = await axios.get(`${BASE_URL}${path}`, {
-    headers: {
-      "x-apisports-key": apiKey(),
-      Accept: "application/json",
-    },
-    params,
-    timeout: 10000,
-  });
-
-  return res.data;
-}
-
-async function getLiveFixtures(): Promise<any[]> {
-  const cacheKey = "brainLive_liveFixtures";
-  const cached = getCache<any[]>(cacheKey);
-
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  markCacheMiss();
-
-  const raw = await apiGet("/fixtures", { live: "all" });
-  const fixtures = Array.isArray(raw?.response) ? raw.response : [];
-
-  setCache(cacheKey, fixtures, LIVE_FIXTURES_TTL_SEC);
-  return fixtures;
 }
 
 function isAllowedLeague(f: any): boolean {
@@ -204,12 +173,10 @@ function getLightCandidateScore(f: any): number {
 
   let score = 0;
 
-  // Finestra minuti
   if (elapsed >= 18 && elapsed <= 40) score += 16;
   if (elapsed >= 46 && elapsed <= 70) score += 20;
   if (elapsed > 70 && elapsed <= 78) score += 6;
 
-  // Scoreline ancora “aperto”
   if (
     (homeGoals === 0 && awayGoals === 0) ||
     (homeGoals === 1 && awayGoals === 0) ||
@@ -223,12 +190,10 @@ function getLightCandidateScore(f: any): number {
     score -= 12;
   }
 
-  // Top leghe premium
   if ([39, 140, 135, 78, 61, 2, 3].includes(leagueId)) {
     score += 8;
   }
 
-  // Pari = spesso match ancora più “vivo”
   if (goalDiff === 0) score += 6;
 
   return score;
@@ -284,6 +249,10 @@ function toCandidate(f: any): BrainLiveCandidate | null {
   };
 }
 
+function getLightResultCacheKey(maxResults: number): string {
+  return `brainLive_light_candidates_${maxResults}`;
+}
+
 function getPrecomputedCacheKey(maxResults: number): string {
   return `brainLive_precomputed_${maxResults}`;
 }
@@ -298,8 +267,18 @@ function getBrainLiveFromCache(maxResults: number): BrainLiveResult | null {
   return raw as BrainLiveResult;
 }
 
+/**
+ * IMPORTANTE:
+ * qui non leggiamo più live via axios locale.
+ * Usiamo la cache live condivisa di apiFootball.ts
+ */
+async function loadSharedLiveFixtures(): Promise<any[]> {
+  const raw = await getLiveFixtures("brainLive");
+  return Array.isArray(raw?.response) ? raw.response : [];
+}
+
 async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> {
-  const cacheKey = `brainLive_light_candidates_${maxResults}`;
+  const cacheKey = getLightResultCacheKey(maxResults);
   const cached = getCache<BrainLiveResult>(cacheKey);
 
   if (cached) {
@@ -311,7 +290,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> 
 
   const startedAt = Date.now();
 
-  const fixtures = await getLiveFixtures();
+  const fixtures = await loadSharedLiveFixtures();
   const filtered = fixtures.filter(isUsefulLiveFixture);
 
   const candidates = dedupeByFixture(filtered)
@@ -340,13 +319,16 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> 
     `[brainLive] light done in ${totalMs}ms | liveTotal=${fixtures.length} | filtered=${filtered.length} | candidates=${candidates.length}`
   );
 
-  logDebug("[brainLive] candidates", candidates.map((c) => ({
-    fixtureId: c.fixtureId,
-    match: `${c.home.name} vs ${c.away.name}`,
-    minute: c.elapsed,
-    lightScore: c.lightScore,
-    scoreHint: c.scoreHint,
-  })));
+  logDebug(
+    "[brainLive] candidates",
+    candidates.map((c) => ({
+      fixtureId: c.fixtureId,
+      match: `${c.home.name} vs ${c.away.name}`,
+      minute: c.elapsed,
+      lightScore: c.lightScore,
+      scoreHint: c.scoreHint,
+    }))
+  );
 
   return result;
 }
@@ -365,6 +347,7 @@ function getDefaultBrainLivePayload(_maxResults: number = 8): BrainLiveResult {
 
 let brainLivePollerStarted = false;
 let brainLivePollerBusy = false;
+let brainLiveInterval: NodeJS.Timeout | null = null;
 
 function startBrainLivePoller(maxResults: number = 8): void {
   if (brainLivePollerStarted) {
@@ -395,14 +378,14 @@ function startBrainLivePoller(maxResults: number = 8): void {
   };
 
   run();
-  setInterval(run, BRAIN_LIVE_POLL_INTERVAL_MS);
+  brainLiveInterval = setInterval(run, BRAIN_LIVE_POLL_INTERVAL_MS);
 
   console.log(
-    `[brainLive] light poller started | intervalMs=${BRAIN_LIVE_POLL_INTERVAL_MS} | maxResults=${maxResults}`
+    `[brainLive] shared-live poller started | intervalMs=${BRAIN_LIVE_POLL_INTERVAL_MS} | maxResults=${maxResults}`
   );
 }
 
-console.log("[brainLive.ts] light module loaded");
+console.log("[brainLive.ts] shared-live module loaded");
 
 export {
   buildBrainLive,

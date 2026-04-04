@@ -29,6 +29,7 @@ router.get("/compact", async (req: Request, res: Response) => {
   } catch (e: any) {
     const status = e?.response?.status;
     const details = e?.response?.data ?? e?.message ?? e;
+
     console.error("LEAGUE FIXTURES COMPACT ERROR:", status, details);
 
     return res.status(500).json({

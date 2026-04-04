@@ -1,4 +1,3 @@
-import { getFixtureEventsCached } from "./apiFootball";
 import { getRedCardsForFixtureFromLiveCache } from "./redCardsLive";
 
 type LiteEvent = {
@@ -60,55 +59,44 @@ function countRedCards(
   };
 }
 
-function hasAnyCard(events: any[]): boolean {
-  return (events ?? []).some((ev: any) => isCardEvent(ev));
-}
-
 function isLiveStatus(statusShort?: string | null): boolean {
   const s = String(statusShort ?? "").toUpperCase();
   return ["1H", "2H", "HT", "ET", "BT", "P", "INT"].includes(s);
 }
 
-function hasStartedStatus(statusShort?: string | null): boolean {
-  const s = String(statusShort ?? "").toUpperCase();
-
-  if (!s) return false;
-  if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(s)) return false;
-
-  return true;
-}
-
 /**
- * Strategia:
- * - se ci sono già eventi nel fixture e contengono card, li usiamo subito
- * - se è live, prima proviamo la cache redCardsLive alimentata dal poller
- * - se serve ancora, facciamo /fixtures/events con cache
+ * Regola nuova:
+ * - NIENTE fetch a /fixtures/events dentro le liste compact
+ * - usiamo solo:
+ *   1) eventi già presenti nel payload fixture
+ *   2) cache rossi live alimentata dal poller
+ * - altrimenti redCards = 0
+ *
+ * Questo taglia tantissime chiamate provider inutili.
  */
-async function resolveEventsAndReds(f: any): Promise<{
+function resolveEventsAndReds(f: any): {
   events: any[];
   reds: { home: number; away: number; total: number };
-}> {
+} {
   const fixtureId = f?.fixture?.id ?? null;
   const statusShort = f?.fixture?.status?.short ?? null;
   const homeId: number | null = f?.teams?.home?.id ?? null;
   const awayId: number | null = f?.teams?.away?.id ?? null;
 
-  let events = Array.isArray(f?.events) ? f.events : [];
+  const events = Array.isArray(f?.events) ? f.events : [];
 
-  // 1) Se abbiamo già card negli eventi inclusi, basta questo
-  if (events.length > 0 && hasAnyCard(events)) {
+  if (events.length > 0) {
     const reds = countRedCards(events, homeId, awayId);
     return { events, reds };
   }
 
-  // 2) Se è live, prova prima la cache redCardsLive del poller
   if (fixtureId && isLiveStatus(statusShort)) {
     const cachedLiveReds = getRedCardsForFixtureFromLiveCache(fixtureId);
     const total = cachedLiveReds.home + cachedLiveReds.away;
 
     if (total > 0) {
       return {
-        events,
+        events: [],
         reds: {
           home: cachedLiveReds.home,
           away: cachedLiveReds.away,
@@ -118,31 +106,18 @@ async function resolveEventsAndReds(f: any): Promise<{
     }
   }
 
-  // 3) Se la partita è iniziata, recupera eventi completi da endpoint dedicato
-  if (fixtureId && hasStartedStatus(statusShort)) {
-    try {
-      const evData = await getFixtureEventsCached(fixtureId, "events");
-      const full = Array.isArray(evData?.response) ? evData.response : [];
-
-      if (full.length > 0) {
-        events = full;
-      }
-    } catch {
-      // non blocchiamo tutta la risposta se gli events falliscono
-    }
-  }
-
-  const reds = countRedCards(events, homeId, awayId);
-  return { events, reds };
+  return {
+    events: [],
+    reds: { home: 0, away: 0, total: 0 },
+  };
 }
 
 async function fixtureToCompact(f: any): Promise<any> {
   const fixtureId = f?.fixture?.id ?? null;
-
   const homeId: number | null = f?.teams?.home?.id ?? null;
   const awayId: number | null = f?.teams?.away?.id ?? null;
 
-  const { events, reds } = await resolveEventsAndReds(f);
+  const { events, reds } = resolveEventsAndReds(f);
 
   return {
     fixtureId,
