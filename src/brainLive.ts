@@ -31,6 +31,12 @@ type BrainLiveCandidate = {
 
 type BrainLiveResult = {
   candidates: BrainLiveCandidate[];
+  topLiveCount?: number;
+};
+
+type BrainLiveBuildOutput = {
+  result: BrainLiveResult;
+  topLiveCount: number;
 };
 
 const DEBUG_BRAIN_LIVE = false;
@@ -38,34 +44,52 @@ const DEBUG_BRAIN_LIVE = false;
 const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE", "INT"]);
 
 const ALLOWED_LEAGUE_IDS = new Set<number>([
-  61,
-  140,
-  78,
-  135,
-  94,
-  88,
-  39,
-  218,
-  119,
-  144,
-  2,
-  3,
-  137,
-  207,
+  61,  // Ligue 1
+  140, // La Liga
+  78,  // Bundesliga
+  135, // Serie A
+  94,  // Primeira Liga
+  88,  // Eredivisie
+  39,  // Premier League
+  218, // Austria Bundesliga
+  119, // Denmark Superliga
+  144, // Jupiler Pro League
+  2,   // Champions League
+  3,   // Europa League
+  137, // Coppa Italia
+  207, // Switzerland Super League
 ]);
 
+/**
+ * Cache dei candidati leggeri.
+ */
 const FINAL_RESULT_TTL_SEC = 25;
+
+/**
+ * Cache precomputata letta dall’endpoint.
+ */
 const PRECOMPUTED_CACHE_TTL_SEC = 50;
 
 /**
- * Più rilassato: il cervello live non è una livescore page.
+ * Poller dinamico:
+ * - nessun top live -> molto lento
+ * - pochi top live -> medio
+ * - diversi top live -> più rapido
  */
-const BRAIN_LIVE_POLL_INTERVAL_MS = 45_000;
+const POLL_MS_NO_TOP_LIVE = 90_000;
+const POLL_MS_FEW_TOP_LIVE = 60_000;
+const POLL_MS_MANY_TOP_LIVE = 35_000;
 
 function logDebug(...args: any[]) {
   if (DEBUG_BRAIN_LIVE) {
     console.log(...args);
   }
+}
+
+function getNextPollIntervalMs(topLiveCount: number): number {
+  if (topLiveCount <= 0) return POLL_MS_NO_TOP_LIVE;
+  if (topLiveCount <= 3) return POLL_MS_FEW_TOP_LIVE;
+  return POLL_MS_MANY_TOP_LIVE;
 }
 
 function isAllowedLeague(f: any): boolean {
@@ -258,20 +282,23 @@ function getBrainLiveFromCache(maxResults: number): BrainLiveResult | null {
 }
 
 /**
- * Ora BrainLive legge SOLO live top leagues.
+ * Ora BrainLive usa soltanto la fetch top-live dedicata.
  */
 async function loadSharedLiveFixtures(): Promise<any[]> {
   const raw = await getTopLiveFixtures("brainLive");
   return Array.isArray(raw?.response) ? raw.response : [];
 }
 
-async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> {
+async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOutput> {
   const cacheKey = getLightResultCacheKey(maxResults);
   const cached = getCache<BrainLiveResult>(cacheKey);
 
   if (cached) {
     markCacheHit();
-    return cached;
+    return {
+      result: cached,
+      topLiveCount: Number(cached.topLiveCount ?? cached.candidates.length ?? 0),
+    };
   }
 
   markCacheMiss();
@@ -298,7 +325,10 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> 
     .map((x) => toCandidate(x.fixture))
     .filter((x): x is BrainLiveCandidate => x != null);
 
-  const result: BrainLiveResult = { candidates };
+  const result: BrainLiveResult = {
+    candidates,
+    topLiveCount: filtered.length,
+  };
 
   setCache(cacheKey, result, FINAL_RESULT_TTL_SEC);
 
@@ -318,24 +348,38 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> 
     }))
   );
 
-  return result;
+  return {
+    result,
+    topLiveCount: filtered.length,
+  };
 }
 
-async function refreshBrainLiveCache(maxResults: number = 8): Promise<BrainLiveResult> {
-  const result = await buildBrainLive(maxResults);
-  setCache(getPrecomputedCacheKey(maxResults), result, PRECOMPUTED_CACHE_TTL_SEC);
-  return result;
+async function refreshBrainLiveCache(maxResults: number = 8): Promise<BrainLiveBuildOutput> {
+  const built = await buildBrainLive(maxResults);
+  setCache(getPrecomputedCacheKey(maxResults), built.result, PRECOMPUTED_CACHE_TTL_SEC);
+  return built;
 }
 
 function getDefaultBrainLivePayload(_maxResults: number = 8): BrainLiveResult {
   return {
     candidates: [],
+    topLiveCount: 0,
   };
 }
 
 let brainLivePollerStarted = false;
 let brainLivePollerBusy = false;
-let brainLiveInterval: NodeJS.Timeout | null = null;
+let brainLiveTimer: NodeJS.Timeout | null = null;
+
+function scheduleNextRun(run: () => Promise<void>, delayMs: number) {
+  if (brainLiveTimer) {
+    clearTimeout(brainLiveTimer);
+  }
+
+  brainLiveTimer = setTimeout(() => {
+    void run();
+  }, delayMs);
+}
 
 function startBrainLivePoller(maxResults: number = 8): void {
   if (brainLivePollerStarted) {
@@ -348,32 +392,41 @@ function startBrainLivePoller(maxResults: number = 8): void {
   const run = async () => {
     if (brainLivePollerBusy) {
       console.log("[brainLive] poller skipped: previous run still in progress");
+      scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
       return;
     }
 
     brainLivePollerBusy = true;
 
     try {
-      await refreshBrainLiveCache(maxResults);
+      const built = await refreshBrainLiveCache(maxResults);
+      const nextMs = getNextPollIntervalMs(built.topLiveCount);
+
+      console.log(
+        `[brainLive] next poll in ${nextMs}ms | topLiveCount=${built.topLiveCount}`
+      );
+
+      scheduleNextRun(run, nextMs);
     } catch (e: any) {
       console.error(
         "[brainLive] poller refresh error:",
         e?.response?.data ?? e?.message ?? e
       );
+
+      scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
     } finally {
       brainLivePollerBusy = false;
     }
   };
 
-  run();
-  brainLiveInterval = setInterval(run, BRAIN_LIVE_POLL_INTERVAL_MS);
+  void run();
 
   console.log(
-    `[brainLive] top-live poller started | intervalMs=${BRAIN_LIVE_POLL_INTERVAL_MS} | maxResults=${maxResults}`
+    `[brainLive] dynamic top-live poller started | maxResults=${maxResults}`
   );
 }
 
-console.log("[brainLive.ts] top-live shared module loaded");
+console.log("[brainLive.ts] dynamic top-live module loaded");
 
 export {
   buildBrainLive,

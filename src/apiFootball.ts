@@ -5,6 +5,36 @@ import { liveTtlMs } from "./ttl";
 
 const BASE_URL = "https://v3.football.api-sports.io";
 
+/**
+ * Top leagues usate dal BrainLive.
+ * La stringa viene passata al provider come live=39-140-135-...
+ */
+const BRAIN_LIVE_LEAGUE_IDS = [
+  61,  // Ligue 1
+  140, // La Liga
+  78,  // Bundesliga
+  135, // Serie A
+  94,  // Primeira Liga
+  88,  // Eredivisie
+  39,  // Premier League
+  218, // Austria Bundesliga
+  119, // Denmark Superliga
+  144, // Jupiler Pro League
+  2,   // Champions League
+  3,   // Europa League
+  137, // Coppa Italia
+  207, // Switzerland Super League
+];
+
+const BRAIN_LIVE_LIVE_PARAM = BRAIN_LIVE_LEAGUE_IDS.join("-");
+
+/**
+ * Deduplica richieste concorrenti verso la stessa risorsa.
+ * Se più endpoint chiedono la stessa chiave cache mentre è scaduta,
+ * parte una sola chiamata esterna e gli altri aspettano la stessa Promise.
+ */
+const inflight = new Map<string, Promise<any>>();
+
 function apiKey(): string {
   const key = process.env.API_FOOTBALL_KEY;
   if (!key) {
@@ -32,8 +62,45 @@ async function apiGet(
   return res.data;
 }
 
+async function fetchWithCache<T>(
+  cacheKey: string,
+  ttlSeconds: number,
+  fetcher: () => Promise<T>
+): Promise<T> {
+  const cached = getCache<T>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+
+  const running = inflight.get(cacheKey);
+  if (running) {
+    markCacheHit();
+    return running;
+  }
+
+  markCacheMiss();
+
+  const p = (async () => {
+    try {
+      const fresh = await fetcher();
+      setCache(cacheKey, fresh, ttlSeconds);
+      return fresh;
+    } finally {
+      inflight.delete(cacheKey);
+    }
+  })();
+
+  inflight.set(cacheKey, p);
+  return p;
+}
+
+/**
+ * Live globale condiviso.
+ * Usalo per la sezione Live classica o quando ti serve davvero tutto il live.
+ */
 export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
-  const cacheKey = "liveFixtures";
+  const cacheKey = "liveFixtures_all";
 
   const cached = getCache<any>(cacheKey);
   if (cached) {
@@ -41,15 +108,86 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
     return cached;
   }
 
+  const running = inflight.get(cacheKey);
+  if (running) {
+    markCacheHit();
+    return running;
+  }
+
   markCacheMiss();
 
-  const data = await apiGet("/fixtures", type, { live: "all" });
+  const p = (async () => {
+    try {
+      const data = await apiGet("/fixtures", type, { live: "all" });
 
-  const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
-  const ttlSeconds = Math.max(1, Math.round(liveTtlMs(liveCount) / 1000));
+      const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
 
-  setCache(cacheKey, data, ttlSeconds);
-  return data;
+      /**
+       * Manteniamo un minimo reale per evitare raffiche inutili.
+       */
+      const ttlSeconds = Math.max(
+        12,
+        Math.round(liveTtlMs(liveCount) / 1000)
+      );
+
+      setCache(cacheKey, data, ttlSeconds);
+      return data;
+    } finally {
+      inflight.delete(cacheKey);
+    }
+  })();
+
+  inflight.set(cacheKey, p);
+  return p;
+}
+
+/**
+ * Live ristretto ai top campionati per BrainLive.
+ * Questo evita di scaricare tutto il live mondiale.
+ */
+export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promise<any> {
+  const cacheKey = `liveFixtures_top_${BRAIN_LIVE_LIVE_PARAM}`;
+
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+
+  const running = inflight.get(cacheKey);
+  if (running) {
+    markCacheHit();
+    return running;
+  }
+
+  markCacheMiss();
+
+  const p = (async () => {
+    try {
+      const data = await apiGet("/fixtures", type, {
+        live: BRAIN_LIVE_LIVE_PARAM,
+      });
+
+      const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
+
+      /**
+       * Per BrainLive siamo più conservativi:
+       * meno traffico, meno stress, più stabilità.
+       */
+      const ttlSeconds = Math.max(
+        20,
+        Math.round(liveTtlMs(liveCount) / 1000)
+      );
+
+      setCache(cacheKey, data, ttlSeconds);
+      return data;
+    } finally {
+      inflight.delete(cacheKey);
+    }
+  })();
+
+  inflight.set(cacheKey, p);
+  return p;
 }
 
 export async function getLeagueFixturesByDate(
@@ -60,27 +198,18 @@ export async function getLeagueFixturesByDate(
 ): Promise<any> {
   const cacheKey = `leagueFixtures_${leagueId}_${date}_${season ?? "na"}`;
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
+  return fetchWithCache<any>(cacheKey, 120, async () => {
+    const params: Record<string, any> = {
+      league: leagueId,
+      date,
+    };
 
-  markCacheMiss();
+    if (season) {
+      params.season = season;
+    }
 
-  const params: Record<string, any> = {
-    league: leagueId,
-    date,
-  };
-
-  if (season) {
-    params.season = season;
-  }
-
-  const data = await apiGet("/fixtures", type, params);
-
-  setCache(cacheKey, data, 120);
-  return data;
+    return apiGet("/fixtures", type, params);
+  });
 }
 
 export async function getFixtureEventsCached(
@@ -89,18 +218,9 @@ export async function getFixtureEventsCached(
 ): Promise<any> {
   const cacheKey = `fixtureEvents_${fixtureId}`;
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  markCacheMiss();
-
-  const data = await apiGet("/fixtures/events", type, { fixture: fixtureId });
-
-  setCache(cacheKey, data, 300);
-  return data;
+  return fetchWithCache<any>(cacheKey, 600, async () => {
+    return apiGet("/fixtures/events", type, { fixture: fixtureId });
+  });
 }
 
 export async function getFixturesByDate(
@@ -109,18 +229,9 @@ export async function getFixturesByDate(
 ): Promise<any> {
   const cacheKey = `fixturesByDate_${date}`;
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  markCacheMiss();
-
-  const data = await apiGet("/fixtures", type, { date });
-
-  setCache(cacheKey, data, 600);
-  return data;
+  return fetchWithCache<any>(cacheKey, 600, async () => {
+    return apiGet("/fixtures", type, { date });
+  });
 }
 
 export async function getTeamLastFixtures(
@@ -131,66 +242,53 @@ export async function getTeamLastFixtures(
   const safeLast = Math.max(1, Math.min(last, 10));
   const cacheKey = `teamLastFixtures_${teamId}_${safeLast}`;
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  markCacheMiss();
-
-  const data = await apiGet("/fixtures", type, {
-    team: teamId,
-    last: safeLast,
+  return fetchWithCache<any>(cacheKey, 6 * 60 * 60, async () => {
+    return apiGet("/fixtures", type, {
+      team: teamId,
+      last: safeLast,
+    });
   });
-
-  setCache(cacheKey, data, 6 * 60 * 60);
-  return data;
 }
 
 export async function getPlayersByTeam(teamId: number, season: number): Promise<any> {
   const cacheKey = `players_team_${teamId}_season_${season}`;
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
+  return fetchWithCache<any>(cacheKey, 12 * 60 * 60, async () => {
+    const all: any[] = [];
+    let page = 1;
+    let totalPages = 1;
 
-  markCacheMiss();
+    do {
+      const data = await apiGet("/players", "other", {
+        team: teamId,
+        season,
+        page,
+      });
 
-  const all: any[] = [];
-  let page = 1;
-  let totalPages = 1;
+      const resp = Array.isArray(data?.response) ? data.response : [];
+      all.push(...resp);
 
-  do {
-    const data = await apiGet("/players", "other", { team: teamId, season, page });
+      const pagingTotal = data?.paging?.total;
+      if (pagingTotal != null) {
+        const t = Number(pagingTotal);
+        totalPages = Number.isFinite(t) && t > 0 ? t : 1;
+      } else {
+        totalPages = 1;
+      }
 
-    const resp = Array.isArray(data?.response) ? data.response : [];
-    all.push(...resp);
+      page += 1;
+    } while (page <= totalPages);
 
-    const pagingTotal = data?.paging?.total;
-    if (pagingTotal != null) {
-      const t = Number(pagingTotal);
-      totalPages = Number.isFinite(t) && t > 0 ? t : 1;
-    } else {
-      totalPages = 1;
-    }
-
-    page += 1;
-  } while (page <= totalPages);
-
-  const merged = {
-    response: all,
-    paging: { current: totalPages, total: totalPages },
-  };
-
-  setCache(cacheKey, merged, 12 * 60 * 60);
-  return merged;
+    return {
+      response: all,
+      paging: { current: totalPages, total: totalPages },
+    };
+  });
 }
 
 const apiFootball = {
   getLiveFixtures,
+  getTopLiveFixtures,
   getLeagueFixturesByDate,
   getFixtureEventsCached,
   getFixturesByDate,
