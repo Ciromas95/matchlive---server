@@ -1,6 +1,6 @@
 import { getCache, setCache } from "./cache";
 import { markCacheHit, markCacheMiss } from "./stats";
-import { getLiveFixtures } from "./apiFootball";
+import { getTopLiveFixtures } from "./apiFootball";
 
 type BrainLiveCandidate = {
   fixtureId: number;
@@ -38,39 +38,29 @@ const DEBUG_BRAIN_LIVE = false;
 const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE", "INT"]);
 
 const ALLOWED_LEAGUE_IDS = new Set<number>([
-  61,  // Ligue 1
-  140, // La Liga
-  78,  // Bundesliga
-  135, // Serie A
-  94,  // Primeira Liga
-  88,  // Eredivisie
-  39,  // Premier League
-  218, // Austria Bundesliga
-  119, // Denmark Superliga
-  144, // Jupiler Pro League
-  2,   // Champions League
-  3,   // Europa League
-  137, // Coppa Italia
-  207, // Switzerland Super League
+  61,
+  140,
+  78,
+  135,
+  94,
+  88,
+  39,
+  218,
+  119,
+  144,
+  2,
+  3,
+  137,
+  207,
 ]);
 
-/**
- * Cache leggera risultato finale candidati.
- * Non cache dei fixtures live: quella ormai è condivisa in apiFootball.ts
- */
-const FINAL_RESULT_TTL_SEC = 20;
+const FINAL_RESULT_TTL_SEC = 25;
+const PRECOMPUTED_CACHE_TTL_SEC = 50;
 
 /**
- * Cache precomputata che l’endpoint può servire subito.
- * La teniamo un po’ più lunga del final cache.
+ * Più rilassato: il cervello live non è una livescore page.
  */
-const PRECOMPUTED_CACHE_TTL_SEC = 35;
-
-/**
- * Poller leggermente più lento:
- * tanto i fixtures live sono già cachati globalmente.
- */
-const BRAIN_LIVE_POLL_INTERVAL_MS = 30_000;
+const BRAIN_LIVE_POLL_INTERVAL_MS = 45_000;
 
 function logDebug(...args: any[]) {
   if (DEBUG_BRAIN_LIVE) {
@@ -129,8 +119,8 @@ function isUsefulLiveFixture(f: any): boolean {
   const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
 
   if (!LIVE_STATUSES.has(status)) return false;
-  if (elapsed < 15) return false;
-  if (elapsed > 78) return false;
+  if (elapsed < 18) return false;
+  if (elapsed > 75) return false;
   if (!isAllowedLeague(f)) return false;
   if (isYouthOrReserveFixture(f)) return false;
 
@@ -175,7 +165,7 @@ function getLightCandidateScore(f: any): number {
 
   if (elapsed >= 18 && elapsed <= 40) score += 16;
   if (elapsed >= 46 && elapsed <= 70) score += 20;
-  if (elapsed > 70 && elapsed <= 78) score += 6;
+  if (elapsed > 70 && elapsed <= 75) score += 4;
 
   if (
     (homeGoals === 0 && awayGoals === 0) ||
@@ -268,12 +258,10 @@ function getBrainLiveFromCache(maxResults: number): BrainLiveResult | null {
 }
 
 /**
- * IMPORTANTE:
- * qui non leggiamo più live via axios locale.
- * Usiamo la cache live condivisa di apiFootball.ts
+ * Ora BrainLive legge SOLO live top leagues.
  */
 async function loadSharedLiveFixtures(): Promise<any[]> {
-  const raw = await getLiveFixtures("brainLive");
+  const raw = await getTopLiveFixtures("brainLive");
   return Array.isArray(raw?.response) ? raw.response : [];
 }
 
@@ -316,7 +304,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveResult> 
 
   const totalMs = Date.now() - startedAt;
   console.log(
-    `[brainLive] light done in ${totalMs}ms | liveTotal=${fixtures.length} | filtered=${filtered.length} | candidates=${candidates.length}`
+    `[brainLive] light done in ${totalMs}ms | topLiveTotal=${fixtures.length} | filtered=${filtered.length} | candidates=${candidates.length}`
   );
 
   logDebug(
@@ -381,11 +369,11 @@ function startBrainLivePoller(maxResults: number = 8): void {
   brainLiveInterval = setInterval(run, BRAIN_LIVE_POLL_INTERVAL_MS);
 
   console.log(
-    `[brainLive] shared-live poller started | intervalMs=${BRAIN_LIVE_POLL_INTERVAL_MS} | maxResults=${maxResults}`
+    `[brainLive] top-live poller started | intervalMs=${BRAIN_LIVE_POLL_INTERVAL_MS} | maxResults=${maxResults}`
   );
 }
 
-console.log("[brainLive.ts] shared-live module loaded");
+console.log("[brainLive.ts] top-live shared module loaded");
 
 export {
   buildBrainLive,
