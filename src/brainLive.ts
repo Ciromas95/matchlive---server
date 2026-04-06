@@ -1,5 +1,12 @@
 import { getCache, setCache } from "./cache";
-import { markCacheHit, markCacheMiss } from "./stats";
+import {
+  markCacheHit,
+  markCacheMiss,
+  markBrainLiveRun,
+  markBrainLiveFixturesScanned,
+  markBrainLiveCandidates,
+  getApiStats,
+} from "./stats";
 import { getTopLiveFixtures } from "./apiFootball";
 
 type BrainLiveCandidate = {
@@ -60,22 +67,9 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
   207, // Switzerland Super League
 ]);
 
-/**
- * Cache dei candidati leggeri.
- */
 const FINAL_RESULT_TTL_SEC = 25;
-
-/**
- * Cache precomputata letta dall’endpoint.
- */
 const PRECOMPUTED_CACHE_TTL_SEC = 50;
 
-/**
- * Poller dinamico:
- * - nessun top live -> molto lento
- * - pochi top live -> medio
- * - diversi top live -> più rapido
- */
 const POLL_MS_NO_TOP_LIVE = 90_000;
 const POLL_MS_FEW_TOP_LIVE = 60_000;
 const POLL_MS_MANY_TOP_LIVE = 35_000;
@@ -281,9 +275,6 @@ function getBrainLiveFromCache(maxResults: number): BrainLiveResult | null {
   return raw as BrainLiveResult;
 }
 
-/**
- * Ora BrainLive usa soltanto la fetch top-live dedicata.
- */
 async function loadSharedLiveFixtures(): Promise<any[]> {
   const raw = await getTopLiveFixtures("brainLive");
   return Array.isArray(raw?.response) ? raw.response : [];
@@ -304,8 +295,11 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
   markCacheMiss();
 
   const startedAt = Date.now();
+  markBrainLiveRun();
 
   const fixtures = await loadSharedLiveFixtures();
+  markBrainLiveFixturesScanned(fixtures.length);
+
   const filtered = fixtures.filter(isUsefulLiveFixture);
 
   const candidates = dedupeByFixture(filtered)
@@ -325,6 +319,8 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
     .map((x) => toCandidate(x.fixture))
     .filter((x): x is BrainLiveCandidate => x != null);
 
+  markBrainLiveCandidates(candidates.length);
+
   const result: BrainLiveResult = {
     candidates,
     topLiveCount: filtered.length,
@@ -333,8 +329,10 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
   setCache(cacheKey, result, FINAL_RESULT_TTL_SEC);
 
   const totalMs = Date.now() - startedAt;
+  const stats = getApiStats();
+
   console.log(
-    `[brainLive] light done in ${totalMs}ms | topLiveTotal=${fixtures.length} | filtered=${filtered.length} | candidates=${candidates.length}`
+    `[brainLive] done | ms=${totalMs} | liveTotal=${fixtures.length} | filtered=${filtered.length} | candidates=${candidates.length} | providerCallsTotal=${stats.provider.callsTotal} | providerCallsToday=${stats.provider.callsToday} | appRequestsToday=${stats.traffic.appRequestsToday} | cacheHitsTotal=${stats.cache.hitsTotal} | cacheMissesTotal=${stats.cache.missesTotal}`
   );
 
   logDebug(

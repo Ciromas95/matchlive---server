@@ -396,7 +396,6 @@ if (process.env.ENABLE_POLLER !== "false") {
 }
 console.log("brainLive exports:", Object.keys(brainLiveModule));
 brainLiveModule.startBrainLivePoller(8);
-brainLiveModule.startBrainLivePoller(8);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
