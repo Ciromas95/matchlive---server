@@ -2,6 +2,39 @@ import axios from "axios";
 import { getCache, setCache } from "./cache";
 import { markApiCall, markCacheHit, markCacheMiss } from "./stats";
 
+const PREMATCH_DEBUG = true;
+
+function prematchDebug(label: string, payload?: Record<string, unknown>) {
+  if (!PREMATCH_DEBUG) return;
+  console.log(`[brainPrematch] ${label}`, payload ?? {});
+}
+
+type DiscardReason =
+  | "league_not_allowed"
+  | "odds_below_minimum"
+  | "missing_odds"
+  | "missing_form_data"
+  | "insufficient_scoring_data"
+  | "h2h_too_weak"
+  | "final_score_below_threshold"
+  | "candidate_limit_exceeded"
+  | "unknown";
+
+function logDiscard(
+  reason: DiscardReason,
+  payload: {
+    fixtureId?: number;
+    home?: string;
+    away?: string;
+    league?: string;
+    goalOdd?: number | null;
+    over25Odd?: number | null;
+    extra?: Record<string, unknown>;
+  }
+) {
+  prematchDebug(`discard:${reason}`, payload);
+}
+
 type OddsSnapshot = {
   goal: number | null;
   over25: number | null;
@@ -140,22 +173,22 @@ function isAllowedPrematchCompetition(f: any): boolean {
 
   const allowedLeagueIds = new Set<number>([
     135, // Serie A
-    78,  // Bundesliga
-    39,  // Premier League
-    88,  // Eredivisie
+    78, // Bundesliga
+    39, // Premier League
+    88, // Eredivisie
     140, // La Liga
-    61,  // Ligue 1
-    94,  // Liga Portugal
+    61, // Ligue 1
+    94, // Liga Portugal
     119, // Superliga Denmark
-    2,   // UCL
-    3,   // UEL
-    848, // UECL
-    1,   // World Cup
-    4,   // Euro Championship
-    5,   // Nations League
-    32,  // WC Qual Europe
+    2, // UEFA Champions League
+    3, // UEFA Europa League
+    848, // UEFA Europa Conference League
+    1, // World Cup
+    4, // Euro Championship
+    5, // Nations League
+    32, // WC Qual Europe
     960, // Euro Qual
-    15,  // Club World Cup
+    15, // Club World Cup
   ]);
 
   if (allowedLeagueIds.has(leagueId)) return true;
@@ -169,16 +202,16 @@ function isAllowedPrematchCompetition(f: any): boolean {
   if (country === "portugal" && leagueName.includes("liga portugal")) return true;
   if (country === "denmark" && leagueName.includes("superliga")) return true;
 
-  if (leagueName.includes("champions league")) return true;
-  if (leagueName.includes("europa league")) return true;
-  if (leagueName.includes("conference league")) return true;
+  if (leagueName === "uefa champions league") return true;
+  if (leagueName === "uefa europa league") return true;
+  if (leagueName === "uefa europa conference league") return true;
 
-  if (leagueName.includes("world cup")) return true;
-  if (leagueName.includes("euro championship")) return true;
-  if (leagueName.includes("nations league")) return true;
-  if (leagueName.includes("qualification europe")) return true;
-  if (leagueName.includes("euro qualification")) return true;
-  if (leagueName.includes("club world cup")) return true;
+  if (leagueName === "world cup") return true;
+  if (leagueName === "uefa euro championship") return true;
+  if (leagueName === "uefa nations league") return true;
+  if (leagueName === "world cup - qualification europe") return true;
+  if (leagueName === "uefa euro qualification") return true;
+  if (leagueName === "fifa club world cup") return true;
 
   return false;
 }
@@ -188,27 +221,28 @@ function isCupCompetition(f: any): boolean {
   const leagueName = String(f?.league?.name ?? "").toLowerCase().trim();
 
   const cupIds = new Set<number>([
-    2,   // UCL
-    3,   // UEL
+    2, // UCL
+    3, // UEL
     848, // UECL
-    1,   // World Cup
-    4,   // Euro Championship
-    5,   // Nations League
-    32,  // WC Qual Europe
+    1, // World Cup
+    4, // Euro Championship
+    5, // Nations League
+    32, // WC Qual Europe
     960, // Euro Qual
-    15,  // Club World Cup
+    15, // Club World Cup
   ]);
 
   if (cupIds.has(leagueId)) return true;
 
-  if (leagueName.includes("champions league")) return true;
-  if (leagueName.includes("europa league")) return true;
-  if (leagueName.includes("conference league")) return true;
-  if (leagueName.includes("world cup")) return true;
-  if (leagueName.includes("euro championship")) return true;
-  if (leagueName.includes("nations league")) return true;
-  if (leagueName.includes("qualification")) return true;
-  if (leagueName.includes("club world cup")) return true;
+  if (leagueName === "uefa champions league") return true;
+  if (leagueName === "uefa europa league") return true;
+  if (leagueName === "uefa europa conference league") return true;
+  if (leagueName === "world cup") return true;
+  if (leagueName === "uefa euro championship") return true;
+  if (leagueName === "uefa nations league") return true;
+  if (leagueName === "world cup - qualification europe") return true;
+  if (leagueName === "uefa euro qualification") return true;
+  if (leagueName === "fifa club world cup") return true;
 
   return false;
 }
@@ -218,20 +252,20 @@ function getCompetitionWeight(f: any): number {
   const country = String(f?.league?.country ?? "").toLowerCase().trim();
 
   if (
-    leagueName.includes("champions league") ||
-    leagueName.includes("europa league") ||
-    leagueName.includes("conference league")
+    leagueName === "uefa champions league" ||
+    leagueName === "uefa europa league" ||
+    leagueName === "uefa europa conference league"
   ) {
     return 0.96;
   }
 
   if (
-    leagueName.includes("world cup") ||
-    leagueName.includes("euro championship") ||
-    leagueName.includes("nations league") ||
-    leagueName.includes("qualification europe") ||
-    leagueName.includes("euro qualification") ||
-    leagueName.includes("club world cup")
+    leagueName === "world cup" ||
+    leagueName === "uefa euro championship" ||
+    leagueName === "uefa nations league" ||
+    leagueName === "world cup - qualification europe" ||
+    leagueName === "uefa euro qualification" ||
+    leagueName === "fifa club world cup"
   ) {
     return 0.93;
   }
@@ -331,7 +365,10 @@ async function getFixturesByDateLocal(date: string): Promise<any> {
   return data;
 }
 
-async function getTeamLastFixturesLocal(teamId: number, last: number = RECENT_MATCHES): Promise<any> {
+async function getTeamLastFixturesLocal(
+  teamId: number,
+  last: number = RECENT_MATCHES
+): Promise<any> {
   const safeLast = Math.max(1, Math.min(last, 10));
   const cacheKey = `brainPrematch_teamLastFixtures_${teamId}_${safeLast}`;
 
@@ -379,7 +416,7 @@ async function getHeadToHeadLocal(homeId: number, awayId: number): Promise<any> 
   if (cached) {
     markCacheHit();
     return cached;
-    }
+  }
 
   markCacheMiss();
 
@@ -425,33 +462,37 @@ function extractOddsSnapshot(raw: any): OddsSnapshot {
         const betName = normalizeLabel(bet?.name);
         const values = Array.isArray(bet?.values) ? bet.values : [];
 
-        if (betName.includes("both teams to score") || betName === "btts") {
-          for (const v of values) {
-            const valueLabel = normalizeLabel(v?.value);
-            const odd = parseOdd(v?.odd);
-            if (!odd) continue;
-
-            if (["yes", "si", "sì"].includes(valueLabel)) {
-              goal = goal == null ? odd : Math.min(goal, odd);
-            }
-          }
-        }
-
         if (
-          betName.includes("over/under") ||
-          betName.includes("goals over/under") ||
-          betName.includes("total goals")
+          betName === "both teams score" ||
+          betName === "both teams to score" ||
+          betName === "btts"
         ) {
           for (const v of values) {
             const valueLabel = normalizeLabel(v?.value);
             const odd = parseOdd(v?.odd);
             if (!odd) continue;
 
-            if (valueLabel.includes("over 2.5") || valueLabel === "over 2.5 goals") {
+            if (valueLabel === "yes" || valueLabel === "si" || valueLabel === "sì") {
+              goal = goal == null ? odd : Math.min(goal, odd);
+            }
+          }
+        }
+
+        if (
+          betName === "over/under" ||
+          betName === "goals over/under" ||
+          betName === "total goals"
+        ) {
+          for (const v of values) {
+            const valueLabel = normalizeLabel(v?.value);
+            const odd = parseOdd(v?.odd);
+            if (!odd) continue;
+
+            if (valueLabel === "over 2.5" || valueLabel === "over 2.5 goals") {
               over25 = over25 == null ? odd : Math.min(over25, odd);
             }
 
-            if (valueLabel.includes("under 2.5") || valueLabel === "under 2.5 goals") {
+            if (valueLabel === "under 2.5" || valueLabel === "under 2.5 goals") {
               under25 = under25 == null ? odd : Math.min(under25, odd);
             }
           }
@@ -603,7 +644,11 @@ function buildAwayOnlyStats(raw: any, teamId: number): TeamSplitStats {
   };
 }
 
-function buildRecentOverallStats(raw: any, teamId: number, last: number = RECENT_MATCHES): TeamSplitStats {
+function buildRecentOverallStats(
+  raw: any,
+  teamId: number,
+  last: number = RECENT_MATCHES
+): TeamSplitStats {
   if (!raw || !Array.isArray(raw.response) || raw.response.length === 0) {
     return emptySplitStats();
   }
@@ -674,7 +719,12 @@ function buildRecentOverallStats(raw: any, teamId: number, last: number = RECENT
   };
 }
 
-function buildH2HStats(raw: any, homeTeamId: number, awayTeamId: number, last: number = 5): H2HStats {
+function buildH2HStats(
+  raw: any,
+  homeTeamId: number,
+  awayTeamId: number,
+  last: number = 5
+): H2HStats {
   if (!raw || !Array.isArray(raw.response) || raw.response.length === 0) {
     return emptyH2HStats();
   }
@@ -749,9 +799,9 @@ function buildWeightedMetric(
   totalFallbackValue: number = 0
 ): number {
   if (contextType === "cup") {
-    return recentValue * 0.50 + leagueValue * 0.20 + totalFallbackValue * 0.30;
+    return recentValue * 0.5 + leagueValue * 0.2 + totalFallbackValue * 0.3;
   }
-  return leagueValue * 0.55 + recentValue * 0.35 + totalFallbackValue * 0.10;
+  return leagueValue * 0.55 + recentValue * 0.35 + totalFallbackValue * 0.1;
 }
 
 function evaluatePrematch(
@@ -833,11 +883,11 @@ function evaluatePrematch(
 
   let expectedGoals =
     contextType === "cup"
-      ? structuralExpectedGoals * 0.30 + recentExpectedGoals * 0.55
-      : structuralExpectedGoals * 0.50 + recentExpectedGoals * 0.35;
+      ? structuralExpectedGoals * 0.3 + recentExpectedGoals * 0.55
+      : structuralExpectedGoals * 0.5 + recentExpectedGoals * 0.35;
 
   if (h2h.matches >= 2) {
-    expectedGoals += h2h.avgTotalGoals * 0.10;
+    expectedGoals += h2h.avgTotalGoals * 0.1;
   }
 
   const h2hGoalBonus =
@@ -858,8 +908,8 @@ function evaluatePrematch(
   goalScore -= cleanSheetResistance * 14;
 
   if (odds.goal != null) {
-    if (odds.goal >= 1.55 && odds.goal <= 2.10) goalScore += 4;
-    else if (odds.goal > 2.10 && odds.goal <= 2.60) goalScore += 2;
+    if (odds.goal >= 1.55 && odds.goal <= 2.1) goalScore += 4;
+    else if (odds.goal > 2.1 && odds.goal <= 2.6) goalScore += 2;
     else if (odds.goal < MIN_ODD) goalScore -= 6;
   }
 
@@ -888,8 +938,8 @@ function evaluatePrematch(
   ]) * 10;
 
   if (odds.over25 != null) {
-    if (odds.over25 >= 1.60 && odds.over25 <= 2.20) overScore += 4;
-    else if (odds.over25 > 2.20 && odds.over25 <= 2.70) overScore += 2;
+    if (odds.over25 >= 1.6 && odds.over25 <= 2.2) overScore += 4;
+    else if (odds.over25 > 2.2 && odds.over25 <= 2.7) overScore += 2;
     else if (odds.over25 < MIN_ODD) overScore -= 6;
   }
 
@@ -899,25 +949,49 @@ function evaluatePrematch(
   const goalCandidate =
     goalQuoteOk &&
     homeAttackIndex >= 1.15 &&
-    awayAttackIndex >= 1.10 &&
+    awayAttackIndex >= 1.1 &&
     dualScoringSupport >= 0.64 &&
     dualConcedingSupport >= 0.58 &&
     failedToScoreRisk <= 0.34 &&
     cleanSheetResistance <= 0.34 &&
-    goalSupportRate >= 0.50 &&
+    goalSupportRate >= 0.5 &&
     goalScore >= 61;
+
+  const avgGoalsForCombined = avg([
+    seasonHome.avgGoalsFor,
+    seasonAway.avgGoalsFor,
+    recentHome.avgGoalsFor,
+    recentAway.avgGoalsFor,
+  ]);
 
   const overCandidate =
     overQuoteOk &&
-    expectedGoals >= 2.55 &&
-    overSupportRate >= 0.50 &&
-    avg([
-      seasonHome.avgGoalsFor,
-      seasonAway.avgGoalsFor,
-      recentHome.avgGoalsFor,
-      recentAway.avgGoalsFor,
-    ]) >= 1.20 &&
-    overScore >= 61;
+    overSupportRate >= 0.5 &&
+    overScore >= 61 &&
+    ((expectedGoals >= 2.55 && avgGoalsForCombined >= 1.2) || overScore >= 72);
+
+  prematchDebug("evaluate_prematch", {
+    fixtureId: f?.fixture?.id ?? null,
+    home: f?.teams?.home?.name ?? null,
+    away: f?.teams?.away?.name ?? null,
+    contextType,
+    goalQuoteOk,
+    overQuoteOk,
+    homeAttackIndex: round2(homeAttackIndex),
+    awayAttackIndex: round2(awayAttackIndex),
+    dualScoringSupport: round2(dualScoringSupport),
+    dualConcedingSupport: round2(dualConcedingSupport),
+    failedToScoreRisk: round2(failedToScoreRisk),
+    cleanSheetResistance: round2(cleanSheetResistance),
+    goalSupportRate: round2(goalSupportRate),
+    overSupportRate: round2(overSupportRate),
+    expectedGoals: round2(expectedGoals),
+    avgGoalsForCombined: round2(avgGoalsForCombined),
+    goalScore: round1(goalScore),
+    overScore: round1(overScore),
+    goalCandidate,
+    overCandidate,
+  });
 
   let bestBet: "GOAL" | "OVER 2.5" | null = null;
   let rawScore = 0;
@@ -945,9 +1019,9 @@ function evaluatePrematch(
   let confidence = 0.42;
   confidence += clamp(normalizedScore / 100, 0, 1) * 0.22;
   confidence += clamp(scoreGap / 22, 0, 1) * 0.05;
-  confidence += (seasonHome.matches >= 6 && seasonAway.matches >= 6) ? 0.04 : 0;
-  confidence += (recentHome.matches >= 4 && recentAway.matches >= 4) ? 0.05 : 0;
-  confidence += (h2h.matches >= 2) ? 0.02 : 0;
+  confidence += seasonHome.matches >= 6 && seasonAway.matches >= 6 ? 0.04 : 0;
+  confidence += recentHome.matches >= 4 && recentAway.matches >= 4 ? 0.05 : 0;
+  confidence += h2h.matches >= 2 ? 0.02 : 0;
   confidence += bestBet === "GOAL" && dualScoringSupport >= 0.72 ? 0.03 : 0;
   confidence += bestBet === "OVER 2.5" && expectedGoals >= 2.95 ? 0.03 : 0;
 
@@ -971,31 +1045,6 @@ function evaluatePrematch(
     homeAttackIndex: round2(homeAttackIndex),
     awayAttackIndex: round2(awayAttackIndex),
     dualScoringSupport: round2(dualScoringSupport),
-  };
-}
-
-function buildServerPreAnalysis(
-  f: any,
-  seasonHome: TeamSplitStats,
-  seasonAway: TeamSplitStats,
-  recentHome: TeamSplitStats,
-  recentAway: TeamSplitStats,
-  h2h: H2HStats,
-  odds: OddsSnapshot
-): { preScore: number; candidateBet: string | null } {
-  const evaluated = evaluatePrematch(
-    f,
-    seasonHome,
-    seasonAway,
-    recentHome,
-    recentAway,
-    h2h,
-    odds
-  );
-
-  return {
-    preScore: evaluated.normalizedScore,
-    candidateBet: evaluated.bestBet,
   };
 }
 
@@ -1037,25 +1086,16 @@ function buildPrematchCandidate(
   };
 }
 
-function buildPrematchPick(
+function buildPrematchPickFromEvaluation(
   f: any,
   seasonHome: TeamSplitStats,
   seasonAway: TeamSplitStats,
   recentHome: TeamSplitStats,
   recentAway: TeamSplitStats,
   h2h: H2HStats,
-  odds: OddsSnapshot
+  odds: OddsSnapshot,
+  evaluated: EvaluatedPrematch
 ): PrematchPick | null {
-  const evaluated = evaluatePrematch(
-    f,
-    seasonHome,
-    seasonAway,
-    recentHome,
-    recentAway,
-    h2h,
-    odds
-  );
-
   if (!evaluated.bestBet) return null;
   if (evaluated.normalizedScore < MIN_PICK_SCORE) return null;
   if (evaluated.confidence < MIN_CONFIDENCE) return null;
@@ -1073,19 +1113,27 @@ function buildPrematchPick(
       `${homeName} casa ${round2(seasonHome.avgGoalsFor)} fatti / ${round2(seasonHome.avgGoalsAgainst)} subiti`
     );
     insightParts.push(
-      `${awayName} fuori ${round2(seasonAway.avgGoalsFor)} fatti / ${round2(seasonAway.avgGoalsAgainst)} subiti`
+      `${awayName} fuori ${round2(seasonAway.avgGoalsFor)} fatti / ${round2(
+        seasonAway.avgGoalsAgainst
+      )} subiti`
     );
   } else {
     insightParts.push(
-      `${homeName} ultime ${RECENT_MATCHES}: ${round2(recentHome.avgGoalsFor)} fatti / ${round2(recentHome.avgGoalsAgainst)} subiti`
+      `${homeName} ultime ${RECENT_MATCHES}: ${round2(recentHome.avgGoalsFor)} fatti / ${round2(
+        recentHome.avgGoalsAgainst
+      )} subiti`
     );
     insightParts.push(
-      `${awayName} ultime ${RECENT_MATCHES}: ${round2(recentAway.avgGoalsFor)} fatti / ${round2(recentAway.avgGoalsAgainst)} subiti`
+      `${awayName} ultime ${RECENT_MATCHES}: ${round2(recentAway.avgGoalsFor)} fatti / ${round2(
+        recentAway.avgGoalsAgainst
+      )} subiti`
     );
   }
 
   insightParts.push(
-    `forma ${RECENT_MATCHES}: ${round2(recentHome.avgTotalGoals)} + ${round2(recentAway.avgTotalGoals)}`
+    `forma ${RECENT_MATCHES}: ${round2(recentHome.avgTotalGoals)} + ${round2(
+      recentAway.avgTotalGoals
+    )}`
   );
 
   if (h2h.matches >= 2) {
@@ -1108,13 +1156,12 @@ function buildPrematchPick(
 
   if (evaluated.bestBet === "GOAL") {
     reason =
-      `Profilo da GOAL: entrambe mostrano continuità realizzativa recente ` +
-      `e una buona tendenza a concedere. ` +
+      `Profilo da GOAL: entrambe mostrano continuità realizzativa recente e una buona tendenza a concedere. ` +
       `${homeName} ha indice rete ${round2(evaluated.homeAttackIndex)}, ` +
       `${awayName} ${round2(evaluated.awayAttackIndex)}. ` +
       `Il supporto combinato al gol di entrambe è ${pct(evaluated.dualScoringSupport)}.`;
 
-    if (h2h.matches >= 2 && h2h.bttsRate >= 0.50) {
+    if (h2h.matches >= 2 && h2h.bttsRate >= 0.5) {
       reason += ` Anche i testa a testa recenti non contrastano il profilo da GOAL.`;
     }
 
@@ -1123,10 +1170,13 @@ function buildPrematchPick(
     }
   } else {
     reason =
-      `Profilo da OVER 2.5: il match ha una stima di circa ${round2(evaluated.expectedGoals)} gol ` +
-      `e supporto over del ${pct(evaluated.overSupportRate)} tra struttura stagionale e forma recente.`;
+      `Profilo da OVER 2.5: il match ha una stima di circa ${round2(
+        evaluated.expectedGoals
+      )} gol e supporto over del ${pct(
+        evaluated.overSupportRate
+      )} tra struttura stagionale e forma recente.`;
 
-    if (h2h.matches >= 2 && h2h.over25Rate >= 0.50) {
+    if (h2h.matches >= 2 && h2h.over25Rate >= 0.5) {
       reason += ` I testa a testa recenti sostengono ulteriormente il volume atteso del match.`;
     }
 
@@ -1176,7 +1226,7 @@ async function buildBrainPrematch(
   picks: PrematchPick[];
   candidates: PrematchCandidate[];
 }> {
-  const cacheKey = `brainPrematch_v9_context_recent5_${date}_${maxMatches}`;
+  const cacheKey = `brainPrematch_v10_context_clean_${date}_${maxMatches}`;
 
   const cached = getCache<{
     picks: PrematchPick[];
@@ -1189,7 +1239,6 @@ async function buildBrainPrematch(
 
   const raw = await getFixturesByDateLocal(date);
   const fixtures = Array.isArray(raw?.response) ? raw.response : [];
-
   const MAX_PREMATCH_ANALYSIS = 28;
 
   const upcoming = fixtures
@@ -1215,6 +1264,10 @@ async function buildBrainPrematch(
     const awayId = f?.teams?.away?.id ?? null;
     const season = getFixtureSeason(f);
     const contextType: MatchContextType = isCupCompetition(f) ? "cup" : "league";
+    const leagueId = Number(f?.league?.id ?? 0);
+    const leagueName = String(f?.league?.name ?? "");
+    const homeName = String(f?.teams?.home?.name ?? "");
+    const awayName = String(f?.teams?.away?.name ?? "");
 
     if (!fixtureId || !homeId || !awayId) continue;
 
@@ -1222,10 +1275,34 @@ async function buildBrainPrematch(
       const oddsRaw = await getFixtureOddsLocal(fixtureId).catch(() => null);
       const odds = extractOddsSnapshot(oddsRaw);
 
+      prematchDebug("odds_snapshot", {
+        fixtureId,
+        home: homeName,
+        away: awayName,
+        leagueId,
+        league: leagueName,
+        goalOdd: odds.goal,
+        over25Odd: odds.over25,
+        under25Odd: odds.under25,
+        minOdd: MIN_ODD,
+      });
+
       const hasUsableGoal = odds.goal != null && odds.goal >= MIN_ODD;
       const hasUsableOver = odds.over25 != null && odds.over25 >= MIN_ODD;
 
       if (!hasUsableGoal && !hasUsableOver) {
+        logDiscard("odds_below_minimum", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          league: leagueName,
+          goalOdd: odds.goal,
+          over25Odd: odds.over25,
+          extra: {
+            minOdd: MIN_ODD,
+            under25Odd: odds.under25,
+          },
+        });
         continue;
       }
 
@@ -1242,17 +1319,43 @@ async function buildBrainPrematch(
       const recentAway = buildRecentOverallStats(awayRecentRaw, awayId, RECENT_MATCHES);
 
       if (seasonHome.matches < 4 || seasonAway.matches < 4) {
+        logDiscard("insufficient_scoring_data", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          league: leagueName,
+          goalOdd: odds.goal,
+          over25Odd: odds.over25,
+          extra: {
+            seasonHomeMatches: seasonHome.matches,
+            seasonAwayMatches: seasonAway.matches,
+            requiredSeasonMatches: 4,
+          },
+        });
         continue;
       }
 
       if (recentHome.matches < 3 || recentAway.matches < 3) {
+        logDiscard("missing_form_data", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          league: leagueName,
+          goalOdd: odds.goal,
+          over25Odd: odds.over25,
+          extra: {
+            recentHomeMatches: recentHome.matches,
+            recentAwayMatches: recentAway.matches,
+            requiredRecentMatches: 3,
+          },
+        });
         continue;
       }
 
       const h2hRaw = await getHeadToHeadLocal(homeId, awayId).catch(() => null);
       const h2h = buildH2HStats(h2hRaw, homeId, awayId, 5);
 
-      const preAnalysis = buildServerPreAnalysis(
+      const evaluated = evaluatePrematch(
         f,
         seasonHome,
         seasonAway,
@@ -1262,7 +1365,37 @@ async function buildBrainPrematch(
         odds
       );
 
+      const preAnalysis = {
+        preScore: evaluated.normalizedScore,
+        candidateBet: evaluated.bestBet,
+      };
+
+      prematchDebug("pre_analysis", {
+        fixtureId,
+        home: homeName,
+        away: awayName,
+        leagueId,
+        league: leagueName,
+        contextType,
+        candidateBet: preAnalysis.candidateBet,
+        preScore: preAnalysis.preScore,
+      });
+
       if (!preAnalysis.candidateBet || preAnalysis.preScore < 58) {
+        logDiscard("final_score_below_threshold", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          league: leagueName,
+          goalOdd: odds.goal,
+          over25Odd: odds.over25,
+          extra: {
+            candidateBet: preAnalysis.candidateBet,
+            preScore: preAnalysis.preScore,
+            requiredPreScore: 58,
+            contextType,
+          },
+        });
         continue;
       }
 
@@ -1282,17 +1415,43 @@ async function buildBrainPrematch(
 
       candidates.push(candidate);
 
-      const pick = buildPrematchPick(
+      const pick = buildPrematchPickFromEvaluation(
         f,
         seasonHome,
         seasonAway,
         recentHome,
         recentAway,
         h2h,
-        odds
+        odds,
+        evaluated
       );
 
-      if (pick) {
+      if (!pick) {
+        logDiscard("final_score_below_threshold", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          league: leagueName,
+          goalOdd: odds.goal,
+          over25Odd: odds.over25,
+          extra: {
+            stage: "buildPrematchPick_returned_null",
+          },
+        });
+      } else {
+        prematchDebug("final_pick", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          leagueId,
+          league: leagueName,
+          recommendedBet: pick.recommendedBet,
+          score: pick.score,
+          confidence: pick.confidence,
+          goalOdd: pick.odds.goal,
+          over25Odd: pick.odds.over25,
+        });
+
         picks.push(pick);
       }
     } catch {
@@ -1307,10 +1466,8 @@ async function buildBrainPrematch(
   });
 
   candidates.sort((a, b) => {
-    const aRecentAvg =
-      (a.metrics.recentHome.avgTotalGoals + a.metrics.recentAway.avgTotalGoals) / 2;
-    const bRecentAvg =
-      (b.metrics.recentHome.avgTotalGoals + b.metrics.recentAway.avgTotalGoals) / 2;
+    const aRecentAvg = (a.metrics.recentHome.avgTotalGoals + a.metrics.recentAway.avgTotalGoals) / 2;
+    const bRecentAvg = (b.metrics.recentHome.avgTotalGoals + b.metrics.recentAway.avgTotalGoals) / 2;
 
     const aH2HBonus = a.metrics.h2h.matches > 0 ? a.metrics.h2h.avgTotalGoals * 1.5 : 0;
     const bH2HBonus = b.metrics.h2h.matches > 0 ? b.metrics.h2h.avgTotalGoals * 1.5 : 0;

@@ -8,7 +8,7 @@ import { flagUrlFromCountryName } from "./flags";
 import { toLiveCompact } from "./compact";
 import { addClient, removeClient } from "./stream";
 import { startPoller } from "./poller";
-import { getApiStats, markEndpointHit } from "./stats";
+import { getApiStats, markAppRequest } from "./stats";
 import { cacheSize } from "./cache";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
@@ -167,7 +167,7 @@ app.use("/api", (req: Request, res: Response, next: NextFunction) => {
 // Endpoint hits
 // ===============================
 app.use("/api", (req: Request, _res: Response, next: NextFunction) => {
-  markEndpointHit(req.method, req.path);
+  markAppRequest(req.method, req.path);
   next();
 });
 
