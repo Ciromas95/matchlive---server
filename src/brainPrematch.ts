@@ -15,7 +15,6 @@ type DiscardReason =
   | "missing_odds"
   | "missing_form_data"
   | "insufficient_scoring_data"
-  | "h2h_too_weak"
   | "final_score_below_threshold"
   | "candidate_limit_exceeded"
   | "unknown";
@@ -99,8 +98,10 @@ type PrematchPick = {
 };
 
 type PrematchMetrics = {
-  seasonHome: TeamSplitStats;
-  seasonAway: TeamSplitStats;
+  overallHome: TeamSplitStats;
+  overallAway: TeamSplitStats;
+  splitHome: TeamSplitStats;
+  splitAway: TeamSplitStats;
   recentHome: TeamSplitStats;
   recentAway: TeamSplitStats;
   h2h: H2HStats;
@@ -152,13 +153,16 @@ type EvaluatedPrematch = {
   expectedGoals: number;
   goalSupportRate: number;
   overSupportRate: number;
-  homeAttackIndex: number;
-  awayAttackIndex: number;
-  dualScoringSupport: number;
+  homeGoalProjection: number;
+  awayGoalProjection: number;
+  homeGoalSupport: number;
+  awayGoalSupport: number;
+  volumeSupport: number;
 };
 
 const BASE_URL = "https://v3.football.api-sports.io";
 const NOT_STARTED = new Set(["NS", "TBD"]);
+const FINISHED_STATUSES = new Set(["FT", "AET", "PEN"]);
 
 const MAX_PICKS_PER_LEAGUE = 2;
 const MIN_PICK_SCORE = 65;
@@ -178,7 +182,7 @@ function isAllowedPrematchCompetition(f: any): boolean {
     88, // Eredivisie
     140, // La Liga
     61, // Ligue 1
-    94, // Liga Portugal
+    94, // Primeira Liga
     119, // Superliga Denmark
     2, // UEFA Champions League
     3, // UEFA Europa League
@@ -199,6 +203,7 @@ function isAllowedPrematchCompetition(f: any): boolean {
   if (country === "netherlands" && leagueName === "eredivisie") return true;
   if (country === "spain" && leagueName === "la liga") return true;
   if (country === "france" && leagueName === "ligue 1") return true;
+  if (country === "portugal" && leagueName.includes("primeira")) return true;
   if (country === "portugal" && leagueName.includes("liga portugal")) return true;
   if (country === "denmark" && leagueName.includes("superliga")) return true;
 
@@ -221,15 +226,15 @@ function isCupCompetition(f: any): boolean {
   const leagueName = String(f?.league?.name ?? "").toLowerCase().trim();
 
   const cupIds = new Set<number>([
-    2, // UCL
-    3, // UEL
-    848, // UECL
-    1, // World Cup
-    4, // Euro Championship
-    5, // Nations League
-    32, // WC Qual Europe
-    960, // Euro Qual
-    15, // Club World Cup
+    2,
+    3,
+    848,
+    1,
+    4,
+    5,
+    32,
+    960,
+    15,
   ]);
 
   if (cupIds.has(leagueId)) return true;
@@ -256,7 +261,7 @@ function getCompetitionWeight(f: any): number {
     leagueName === "uefa europa league" ||
     leagueName === "uefa europa conference league"
   ) {
-    return 0.96;
+    return 0.97;
   }
 
   if (
@@ -267,7 +272,7 @@ function getCompetitionWeight(f: any): number {
     leagueName === "uefa euro qualification" ||
     leagueName === "fifa club world cup"
   ) {
-    return 0.93;
+    return 0.95;
   }
 
   if (
@@ -277,13 +282,13 @@ function getCompetitionWeight(f: any): number {
     (country === "netherlands" && leagueName === "eredivisie") ||
     (country === "spain" && leagueName === "la liga") ||
     (country === "france" && leagueName === "ligue 1") ||
-    (country === "portugal" && leagueName.includes("liga portugal")) ||
+    (country === "portugal" && (leagueName.includes("primeira") || leagueName.includes("liga portugal"))) ||
     (country === "denmark" && leagueName.includes("superliga"))
   ) {
     return 1.0;
   }
 
-  return 0.95;
+  return 0.96;
 }
 
 function apiKey(): string {
@@ -318,6 +323,21 @@ function avg(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) / values.length;
 }
 
+function weightedAvg(pairs: Array<[number, number]>): number {
+  const valid = pairs.filter(([value, weight]) => Number.isFinite(value) && weight > 0);
+  if (!valid.length) return 0;
+
+  let num = 0;
+  let den = 0;
+
+  for (const [value, weight] of valid) {
+    num += value * weight;
+    den += weight;
+  }
+
+  return den > 0 ? num / den : 0;
+}
+
 function round1(n: number): number {
   return Number(n.toFixed(1));
 }
@@ -348,6 +368,22 @@ function normalizeLabel(value: any): string {
     .trim();
 }
 
+function sortFixturesDescByDate(fixtures: any[]): any[] {
+  return [...fixtures].sort((a, b) => {
+    const da = new Date(a?.fixture?.date ?? 0).getTime();
+    const db = new Date(b?.fixture?.date ?? 0).getTime();
+    return db - da;
+  });
+}
+
+function getFinishedFixtures(raw: any): any[] {
+  const response = Array.isArray(raw?.response) ? raw.response : [];
+  return response.filter((e: any) => {
+    const status = String(e?.fixture?.status?.short ?? "").toUpperCase();
+    return FINISHED_STATUSES.has(status);
+  });
+}
+
 async function getFixturesByDateLocal(date: string): Promise<any> {
   const cacheKey = `brainPrematch_fixturesByDate_${date}`;
 
@@ -365,32 +401,12 @@ async function getFixturesByDateLocal(date: string): Promise<any> {
   return data;
 }
 
-async function getTeamLastFixturesLocal(
+async function getTeamCompetitionFixturesLocal(
   teamId: number,
-  last: number = RECENT_MATCHES
+  season: number,
+  leagueId: number
 ): Promise<any> {
-  const safeLast = Math.max(1, Math.min(last, 10));
-  const cacheKey = `brainPrematch_teamLastFixtures_${teamId}_${safeLast}`;
-
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  markCacheMiss();
-
-  const data = await apiGet("/fixtures", {
-    team: teamId,
-    last: safeLast,
-  });
-
-  setCache(cacheKey, data, 6 * 60 * 60);
-  return data;
-}
-
-async function getTeamSeasonFixturesLocal(teamId: number, season: number): Promise<any> {
-  const cacheKey = `brainPrematch_teamSeasonFixtures_${teamId}_${season}`;
+  const cacheKey = `brainPrematch_teamCompetitionFixtures_${teamId}_${season}_${leagueId}`;
 
   const cached = getCache<any>(cacheKey);
   if (cached) {
@@ -403,6 +419,7 @@ async function getTeamSeasonFixturesLocal(teamId: number, season: number): Promi
   const data = await apiGet("/fixtures", {
     team: teamId,
     season,
+    league: leagueId,
   });
 
   setCache(cacheKey, data, 6 * 60 * 60);
@@ -532,10 +549,9 @@ function emptyH2HStats(): H2HStats {
   };
 }
 
-function buildHomeOnlyStats(raw: any, teamId: number): TeamSplitStats {
-  if (!raw || !Array.isArray(raw.response) || raw.response.length === 0) {
-    return emptySplitStats();
-  }
+function buildOverallStats(raw: any, teamId: number): TeamSplitStats {
+  const fixtures = getFinishedFixtures(raw);
+  if (!fixtures.length) return emptySplitStats();
 
   let count = 0;
   let gf = 0;
@@ -547,10 +563,72 @@ function buildHomeOnlyStats(raw: any, teamId: number): TeamSplitStats {
   let failedToScore = 0;
   let cleanSheet = 0;
 
-  for (const e of raw.response) {
-    const status = String(e?.fixture?.status?.short ?? "").toUpperCase();
-    if (!["FT", "AET", "PEN"].includes(status)) continue;
+  for (const e of fixtures) {
+    const homeId = e?.teams?.home?.id ?? null;
+    const awayId = e?.teams?.away?.id ?? null;
 
+    const homeGoals = Number(e?.goals?.home ?? 0);
+    const awayGoals = Number(e?.goals?.away ?? 0);
+
+    let thisGf = 0;
+    let thisGa = 0;
+
+    if (homeId === teamId) {
+      thisGf = homeGoals;
+      thisGa = awayGoals;
+    } else if (awayId === teamId) {
+      thisGf = awayGoals;
+      thisGa = homeGoals;
+    } else {
+      continue;
+    }
+
+    gf += thisGf;
+    ga += thisGa;
+
+    if (thisGf > 0) scored += 1;
+    if (thisGa > 0) conceded += 1;
+    if (thisGf === 0) failedToScore += 1;
+    if (thisGa === 0) cleanSheet += 1;
+    if (homeGoals > 0 && awayGoals > 0) btts += 1;
+    if (homeGoals + awayGoals >= 3) over25 += 1;
+
+    count += 1;
+  }
+
+  if (count === 0) return emptySplitStats();
+
+  return {
+    matches: count,
+    goalsFor: gf,
+    goalsAgainst: ga,
+    avgGoalsFor: gf / count,
+    avgGoalsAgainst: ga / count,
+    avgTotalGoals: (gf + ga) / count,
+    bttsRate: btts / count,
+    over25Rate: over25 / count,
+    scoredRate: scored / count,
+    concededRate: conceded / count,
+    failedToScoreRate: failedToScore / count,
+    cleanSheetRate: cleanSheet / count,
+  };
+}
+
+function buildHomeOnlyStats(raw: any, teamId: number): TeamSplitStats {
+  const fixtures = getFinishedFixtures(raw);
+  if (!fixtures.length) return emptySplitStats();
+
+  let count = 0;
+  let gf = 0;
+  let ga = 0;
+  let btts = 0;
+  let over25 = 0;
+  let scored = 0;
+  let conceded = 0;
+  let failedToScore = 0;
+  let cleanSheet = 0;
+
+  for (const e of fixtures) {
     const homeId = e?.teams?.home?.id ?? null;
     if (homeId !== teamId) continue;
 
@@ -589,9 +667,8 @@ function buildHomeOnlyStats(raw: any, teamId: number): TeamSplitStats {
 }
 
 function buildAwayOnlyStats(raw: any, teamId: number): TeamSplitStats {
-  if (!raw || !Array.isArray(raw.response) || raw.response.length === 0) {
-    return emptySplitStats();
-  }
+  const fixtures = getFinishedFixtures(raw);
+  if (!fixtures.length) return emptySplitStats();
 
   let count = 0;
   let gf = 0;
@@ -603,10 +680,7 @@ function buildAwayOnlyStats(raw: any, teamId: number): TeamSplitStats {
   let failedToScore = 0;
   let cleanSheet = 0;
 
-  for (const e of raw.response) {
-    const status = String(e?.fixture?.status?.short ?? "").toUpperCase();
-    if (!["FT", "AET", "PEN"].includes(status)) continue;
-
+  for (const e of fixtures) {
     const awayId = e?.teams?.away?.id ?? null;
     if (awayId !== teamId) continue;
 
@@ -644,14 +718,13 @@ function buildAwayOnlyStats(raw: any, teamId: number): TeamSplitStats {
   };
 }
 
-function buildRecentOverallStats(
+function buildRecentCompetitionStats(
   raw: any,
   teamId: number,
   last: number = RECENT_MATCHES
 ): TeamSplitStats {
-  if (!raw || !Array.isArray(raw.response) || raw.response.length === 0) {
-    return emptySplitStats();
-  }
+  const fixtures = sortFixturesDescByDate(getFinishedFixtures(raw));
+  if (!fixtures.length) return emptySplitStats();
 
   let count = 0;
   let gf = 0;
@@ -663,11 +736,8 @@ function buildRecentOverallStats(
   let failedToScore = 0;
   let cleanSheet = 0;
 
-  for (const e of raw.response) {
+  for (const e of fixtures) {
     if (count >= last) break;
-
-    const status = String(e?.fixture?.status?.short ?? "").toUpperCase();
-    if (!["FT", "AET", "PEN"].includes(status)) continue;
 
     const homeId = e?.teams?.home?.id ?? null;
     const awayId = e?.teams?.away?.id ?? null;
@@ -725,9 +795,8 @@ function buildH2HStats(
   awayTeamId: number,
   last: number = 5
 ): H2HStats {
-  if (!raw || !Array.isArray(raw.response) || raw.response.length === 0) {
-    return emptyH2HStats();
-  }
+  const fixtures = sortFixturesDescByDate(getFinishedFixtures(raw));
+  if (!fixtures.length) return emptyH2HStats();
 
   let count = 0;
   let homeGoalsSum = 0;
@@ -735,11 +804,8 @@ function buildH2HStats(
   let btts = 0;
   let over25 = 0;
 
-  for (const e of raw.response) {
+  for (const e of fixtures) {
     if (count >= last) break;
-
-    const status = String(e?.fixture?.status?.short ?? "").toUpperCase();
-    if (!["FT", "AET", "PEN"].includes(status)) continue;
 
     const rawHomeId = e?.teams?.home?.id ?? null;
     const rawAwayId = e?.teams?.away?.id ?? null;
@@ -792,22 +858,12 @@ function getFixtureSeason(f: any): number {
   return new Date().getUTCFullYear();
 }
 
-function buildWeightedMetric(
-  contextType: MatchContextType,
-  leagueValue: number,
-  recentValue: number,
-  totalFallbackValue: number = 0
-): number {
-  if (contextType === "cup") {
-    return recentValue * 0.5 + leagueValue * 0.2 + totalFallbackValue * 0.3;
-  }
-  return leagueValue * 0.55 + recentValue * 0.35 + totalFallbackValue * 0.1;
-}
-
 function evaluatePrematch(
   f: any,
-  seasonHome: TeamSplitStats,
-  seasonAway: TeamSplitStats,
+  overallHome: TeamSplitStats,
+  overallAway: TeamSplitStats,
+  splitHome: TeamSplitStats,
+  splitAway: TeamSplitStats,
   recentHome: TeamSplitStats,
   recentAway: TeamSplitStats,
   h2h: H2HStats,
@@ -815,132 +871,181 @@ function evaluatePrematch(
 ): EvaluatedPrematch {
   const contextType: MatchContextType = isCupCompetition(f) ? "cup" : "league";
 
-  const homeAttackIndex = buildWeightedMetric(
-    contextType,
-    avg([seasonHome.avgGoalsFor, seasonAway.avgGoalsAgainst]),
-    avg([recentHome.avgGoalsFor, recentAway.avgGoalsAgainst]),
-    avg([seasonHome.scoredRate * 2.2, recentHome.scoredRate * 2.2])
-  );
-
-  const awayAttackIndex = buildWeightedMetric(
-    contextType,
-    avg([seasonAway.avgGoalsFor, seasonHome.avgGoalsAgainst]),
-    avg([recentAway.avgGoalsFor, recentHome.avgGoalsAgainst]),
-    avg([seasonAway.scoredRate * 2.2, recentAway.scoredRate * 2.2])
-  );
-
-  const dualScoringSupport = avg([
-    seasonHome.scoredRate,
-    seasonAway.scoredRate,
-    recentHome.scoredRate,
-    recentAway.scoredRate,
+  // PROIEZIONE GOL CASA:
+  // prima dato totale competizione, poi split casa, poi forma recente, poi quanto concede l'avversario
+  const homeGoalProjection = weightedAvg([
+    [overallHome.avgGoalsFor, 0.22],
+    [splitHome.avgGoalsFor, 0.30],
+    [recentHome.avgGoalsFor, 0.14],
+    [overallAway.avgGoalsAgainst, 0.12],
+    [splitAway.avgGoalsAgainst, 0.17],
+    [recentAway.avgGoalsAgainst, 0.05],
   ]);
 
-  const dualConcedingSupport = avg([
-    seasonHome.concededRate,
-    seasonAway.concededRate,
-    recentHome.concededRate,
-    recentAway.concededRate,
+  // PROIEZIONE GOL OSPITE:
+  const awayGoalProjection = weightedAvg([
+    [overallAway.avgGoalsFor, 0.22],
+    [splitAway.avgGoalsFor, 0.30],
+    [recentAway.avgGoalsFor, 0.14],
+    [overallHome.avgGoalsAgainst, 0.12],
+    [splitHome.avgGoalsAgainst, 0.17],
+    [recentHome.avgGoalsAgainst, 0.05],
   ]);
 
-  const failedToScoreRisk = avg([
-    seasonHome.failedToScoreRate,
-    seasonAway.failedToScoreRate,
-    recentHome.failedToScoreRate,
-    recentAway.failedToScoreRate,
+  // SUPPORTO GOAL CASA: quanto è credibile che segni almeno un gol
+  const homeGoalSupport = weightedAvg([
+    [overallHome.scoredRate, 0.20],
+    [splitHome.scoredRate, 0.28],
+    [recentHome.scoredRate, 0.16],
+    [overallAway.concededRate, 0.12],
+    [splitAway.concededRate, 0.18],
+    [recentAway.concededRate, 0.06],
   ]);
 
-  const cleanSheetResistance = avg([
-    seasonHome.cleanSheetRate,
-    seasonAway.cleanSheetRate,
-    recentHome.cleanSheetRate,
-    recentAway.cleanSheetRate,
+  // SUPPORTO GOAL OSPITE
+  const awayGoalSupport = weightedAvg([
+    [overallAway.scoredRate, 0.20],
+    [splitAway.scoredRate, 0.28],
+    [recentAway.scoredRate, 0.16],
+    [overallHome.concededRate, 0.12],
+    [splitHome.concededRate, 0.18],
+    [recentHome.concededRate, 0.06],
   ]);
 
-  const goalSupportRate = avg([
-    seasonHome.bttsRate,
-    seasonAway.bttsRate,
-    recentHome.bttsRate,
-    recentAway.bttsRate,
+  // GOAL = reciprocità
+  const goalSupportRate = weightedAvg([
+    [Math.min(homeGoalSupport, awayGoalSupport), 0.55],
+    [avg([overallHome.bttsRate, overallAway.bttsRate]), 0.20],
+    [avg([splitHome.bttsRate, splitAway.bttsRate]), 0.17],
+    [avg([recentHome.bttsRate, recentAway.bttsRate]), 0.08],
   ]);
 
-  const overSupportRate = avg([
-    seasonHome.over25Rate,
-    seasonAway.over25Rate,
-    recentHome.over25Rate,
-    recentAway.over25Rate,
+  // OVER = volume totale del match
+  const volumeSupport = weightedAvg([
+    [avg([overallHome.avgTotalGoals, overallAway.avgTotalGoals]), 0.25],
+    [avg([splitHome.avgTotalGoals, splitAway.avgTotalGoals]), 0.35],
+    [avg([recentHome.avgTotalGoals, recentAway.avgTotalGoals]), 0.25],
+    [homeGoalProjection + awayGoalProjection, 0.15],
   ]);
 
-  const structuralExpectedGoals = avg([
-    seasonHome.avgGoalsFor + seasonAway.avgGoalsAgainst,
-    seasonAway.avgGoalsFor + seasonHome.avgGoalsAgainst,
+  const overSupportRate = weightedAvg([
+    [avg([overallHome.over25Rate, overallAway.over25Rate]), 0.24],
+    [avg([splitHome.over25Rate, splitAway.over25Rate]), 0.34],
+    [avg([recentHome.over25Rate, recentAway.over25Rate]), 0.28],
+    [clamp((homeGoalProjection + awayGoalProjection) / 3.2, 0, 1), 0.14],
   ]);
 
-  const recentExpectedGoals = avg([
-    recentHome.avgGoalsFor + recentAway.avgGoalsAgainst,
-    recentAway.avgGoalsFor + recentHome.avgGoalsAgainst,
+  let expectedGoals = weightedAvg([
+    [homeGoalProjection + awayGoalProjection, 0.62],
+    [avg([overallHome.avgTotalGoals, overallAway.avgTotalGoals]), 0.14],
+    [avg([splitHome.avgTotalGoals, splitAway.avgTotalGoals]), 0.16],
+    [avg([recentHome.avgTotalGoals, recentAway.avgTotalGoals]), 0.08],
   ]);
 
-  let expectedGoals =
-    contextType === "cup"
-      ? structuralExpectedGoals * 0.3 + recentExpectedGoals * 0.55
-      : structuralExpectedGoals * 0.5 + recentExpectedGoals * 0.35;
+  const homeFailRisk = weightedAvg([
+    [overallHome.failedToScoreRate, 0.22],
+    [splitHome.failedToScoreRate, 0.42],
+    [recentHome.failedToScoreRate, 0.36],
+  ]);
 
-  if (h2h.matches >= 2) {
-    expectedGoals += h2h.avgTotalGoals * 0.1;
+  const awayFailRisk = weightedAvg([
+    [overallAway.failedToScoreRate, 0.22],
+    [splitAway.failedToScoreRate, 0.42],
+    [recentAway.failedToScoreRate, 0.36],
+  ]);
+
+  const homeCleanResistance = weightedAvg([
+    [overallHome.cleanSheetRate, 0.18],
+    [splitHome.cleanSheetRate, 0.34],
+    [recentHome.cleanSheetRate, 0.18],
+    [overallAway.cleanSheetRate, 0.08],
+    [splitAway.cleanSheetRate, 0.14],
+    [recentAway.cleanSheetRate, 0.08],
+  ]);
+
+  const awayCleanResistance = weightedAvg([
+    [overallAway.cleanSheetRate, 0.18],
+    [splitAway.cleanSheetRate, 0.34],
+    [recentAway.cleanSheetRate, 0.18],
+    [overallHome.cleanSheetRate, 0.08],
+    [splitHome.cleanSheetRate, 0.14],
+    [recentHome.cleanSheetRate, 0.08],
+  ]);
+
+  // H2H leggero: solo surplus
+  let h2hGoalBonus = 0;
+  let h2hOverBonus = 0;
+
+  if (h2h.matches >= 3) {
+    h2hGoalBonus =
+      h2h.bttsRate * 3.5 +
+      clamp((h2h.avgTotalGoals - 2.1) * 1.1, -1.5, 2.8);
+
+    h2hOverBonus =
+      h2h.over25Rate * 3.8 +
+      clamp((h2h.avgTotalGoals - 2.3) * 1.3, -1.5, 3.2);
   }
 
-  const h2hGoalBonus =
-    h2h.matches >= 2 ? h2h.bttsRate * 7 + clamp(h2h.avgTotalGoals, 0, 4) * 1.6 : 0;
-
-  const h2hOverBonus =
-    h2h.matches >= 2 ? h2h.over25Rate * 7 + clamp(h2h.avgTotalGoals, 0, 4) * 2.0 : 0;
-
   let goalScore = 0;
-  goalScore += clamp(homeAttackIndex, 0, 3.5) * 16;
-  goalScore += clamp(awayAttackIndex, 0, 3.5) * 16;
-  goalScore += goalSupportRate * 18;
-  goalScore += dualScoringSupport * 12;
-  goalScore += dualConcedingSupport * 10;
+  goalScore += clamp(homeGoalProjection, 0, 2.6) * 18;
+  goalScore += clamp(awayGoalProjection, 0, 2.6) * 18;
+  goalScore += goalSupportRate * 28;
+  goalScore += Math.min(homeGoalSupport, awayGoalSupport) * 14;
   goalScore += h2hGoalBonus;
 
-  goalScore -= failedToScoreRisk * 18;
-  goalScore -= cleanSheetResistance * 14;
+  goalScore -= homeFailRisk * 13;
+  goalScore -= awayFailRisk * 13;
+  goalScore -= homeCleanResistance * 8;
+  goalScore -= awayCleanResistance * 8;
+
+  // GOAL vuole reciprocità vera
+  if (Math.min(homeGoalProjection, awayGoalProjection) < 0.9) {
+    goalScore -= 10;
+  }
+  if (Math.min(homeGoalSupport, awayGoalSupport) < 0.58) {
+    goalScore -= 9;
+  }
 
   if (odds.goal != null) {
-    if (odds.goal >= 1.55 && odds.goal <= 2.1) goalScore += 4;
-    else if (odds.goal > 2.1 && odds.goal <= 2.6) goalScore += 2;
-    else if (odds.goal < MIN_ODD) goalScore -= 6;
+    if (odds.goal >= 1.55 && odds.goal <= 2.15) goalScore += 4;
+    else if (odds.goal > 2.15 && odds.goal <= 2.65) goalScore += 2;
+    else if (odds.goal < MIN_ODD) goalScore -= 8;
   }
 
   let overScore = 0;
-  overScore += clamp(expectedGoals, 0, 4.2) * 14;
-  overScore += overSupportRate * 22;
-  overScore += avg([
-    seasonHome.avgTotalGoals,
-    seasonAway.avgTotalGoals,
-    recentHome.avgTotalGoals,
-    recentAway.avgTotalGoals,
-  ]) * 7;
-  overScore += avg([
-    seasonHome.avgGoalsFor,
-    seasonAway.avgGoalsFor,
-    recentHome.avgGoalsFor,
-    recentAway.avgGoalsFor,
-  ]) * 8;
+  overScore += clamp(expectedGoals, 0, 4.3) * 20;
+  overScore += overSupportRate * 28;
+  overScore += clamp(volumeSupport, 0, 4.5) * 7;
+  overScore += Math.max(homeGoalProjection, awayGoalProjection) * 8;
   overScore += h2hOverBonus;
 
-  overScore -= avg([
-    seasonHome.failedToScoreRate,
-    seasonAway.failedToScoreRate,
-    recentHome.failedToScoreRate,
-    recentAway.failedToScoreRate,
-  ]) * 10;
+  // penalità se volume non basta
+  if (Math.min(homeGoalProjection, awayGoalProjection) < 0.8) {
+    overScore -= 8;
+  }
+  if (expectedGoals < 2.35 && overSupportRate < 0.56) {
+    overScore -= 11;
+  }
+  if (
+    splitHome.avgGoalsFor < 0.95 &&
+    splitAway.avgGoalsFor < 0.95
+  ) {
+    overScore -= 10;
+  }
+
+  overScore -= avg([homeFailRisk, awayFailRisk]) * 8;
 
   if (odds.over25 != null) {
-    if (odds.over25 >= 1.6 && odds.over25 <= 2.2) overScore += 4;
-    else if (odds.over25 > 2.2 && odds.over25 <= 2.7) overScore += 2;
-    else if (odds.over25 < MIN_ODD) overScore -= 6;
+    if (odds.over25 >= 1.60 && odds.over25 <= 2.20) overScore += 4;
+    else if (odds.over25 > 2.20 && odds.over25 <= 2.70) overScore += 2;
+    else if (odds.over25 < MIN_ODD) overScore -= 8;
+  }
+
+  // In coppa riduco leggermente affidabilità strutturale
+  if (contextType === "cup") {
+    goalScore -= 2;
+    overScore -= 2;
+    expectedGoals *= 0.98;
   }
 
   const goalQuoteOk = odds.goal != null && odds.goal >= MIN_ODD;
@@ -948,45 +1053,53 @@ function evaluatePrematch(
 
   const goalCandidate =
     goalQuoteOk &&
-    homeAttackIndex >= 1.15 &&
-    awayAttackIndex >= 1.1 &&
-    dualScoringSupport >= 0.64 &&
-    dualConcedingSupport >= 0.58 &&
-    failedToScoreRisk <= 0.34 &&
-    cleanSheetResistance <= 0.34 &&
-    goalSupportRate >= 0.5 &&
-    goalScore >= 61;
-
-  const avgGoalsForCombined = avg([
-    seasonHome.avgGoalsFor,
-    seasonAway.avgGoalsFor,
-    recentHome.avgGoalsFor,
-    recentAway.avgGoalsFor,
-  ]);
+    homeGoalProjection >= 0.95 &&
+    awayGoalProjection >= 0.95 &&
+    homeGoalSupport >= 0.60 &&
+    awayGoalSupport >= 0.60 &&
+    goalSupportRate >= 0.57 &&
+    homeFailRisk <= 0.42 &&
+    awayFailRisk <= 0.42 &&
+    goalScore >= 62;
 
   const overCandidate =
     overQuoteOk &&
-    overSupportRate >= 0.5 &&
-    overScore >= 61 &&
-    ((expectedGoals >= 2.55 && avgGoalsForCombined >= 1.2) || overScore >= 72);
+    expectedGoals >= 2.45 &&
+    overSupportRate >= 0.52 &&
+    Math.max(homeGoalProjection, awayGoalProjection) >= 1.15 &&
+    overScore >= 62;
 
   prematchDebug("evaluate_prematch", {
     fixtureId: f?.fixture?.id ?? null,
     home: f?.teams?.home?.name ?? null,
     away: f?.teams?.away?.name ?? null,
     contextType,
-    goalQuoteOk,
-    overQuoteOk,
-    homeAttackIndex: round2(homeAttackIndex),
-    awayAttackIndex: round2(awayAttackIndex),
-    dualScoringSupport: round2(dualScoringSupport),
-    dualConcedingSupport: round2(dualConcedingSupport),
-    failedToScoreRisk: round2(failedToScoreRisk),
-    cleanSheetResistance: round2(cleanSheetResistance),
+    overallHomeAvgGF: round2(overallHome.avgGoalsFor),
+    overallHomeAvgGA: round2(overallHome.avgGoalsAgainst),
+    overallAwayAvgGF: round2(overallAway.avgGoalsFor),
+    overallAwayAvgGA: round2(overallAway.avgGoalsAgainst),
+    splitHomeAvgGF: round2(splitHome.avgGoalsFor),
+    splitHomeAvgGA: round2(splitHome.avgGoalsAgainst),
+    splitAwayAvgGF: round2(splitAway.avgGoalsFor),
+    splitAwayAvgGA: round2(splitAway.avgGoalsAgainst),
+    recentHomeAvgGF: round2(recentHome.avgGoalsFor),
+    recentHomeAvgGA: round2(recentHome.avgGoalsAgainst),
+    recentAwayAvgGF: round2(recentAway.avgGoalsFor),
+    recentAwayAvgGA: round2(recentAway.avgGoalsAgainst),
+    homeGoalProjection: round2(homeGoalProjection),
+    awayGoalProjection: round2(awayGoalProjection),
+    homeGoalSupport: round2(homeGoalSupport),
+    awayGoalSupport: round2(awayGoalSupport),
     goalSupportRate: round2(goalSupportRate),
     overSupportRate: round2(overSupportRate),
+    volumeSupport: round2(volumeSupport),
     expectedGoals: round2(expectedGoals),
-    avgGoalsForCombined: round2(avgGoalsForCombined),
+    homeFailRisk: round2(homeFailRisk),
+    awayFailRisk: round2(awayFailRisk),
+    h2hMatches: h2h.matches,
+    h2hAvgTotalGoals: round2(h2h.avgTotalGoals),
+    h2hBttsRate: round2(h2h.bttsRate),
+    h2hOver25Rate: round2(h2h.over25Rate),
     goalScore: round1(goalScore),
     overScore: round1(overScore),
     goalCandidate,
@@ -997,7 +1110,18 @@ function evaluatePrematch(
   let rawScore = 0;
 
   if (goalCandidate && overCandidate) {
-    if (goalScore >= overScore) {
+    // Distinzione più intelligente:
+    // GOAL se il match è più simmetrico,
+    // OVER se il volume totale spinge di più del reciproco.
+    const symmetryEdge =
+      Math.min(homeGoalSupport, awayGoalSupport) -
+      Math.abs(homeGoalProjection - awayGoalProjection) * 0.18;
+
+    const overEdge =
+      overSupportRate +
+      clamp((expectedGoals - 2.5) / 1.2, 0, 0.3);
+
+    if (symmetryEdge >= overEdge - 0.04) {
       bestBet = "GOAL";
       rawScore = goalScore;
     } else {
@@ -1018,16 +1142,16 @@ function evaluatePrematch(
 
   let confidence = 0.42;
   confidence += clamp(normalizedScore / 100, 0, 1) * 0.22;
-  confidence += clamp(scoreGap / 22, 0, 1) * 0.05;
-  confidence += seasonHome.matches >= 6 && seasonAway.matches >= 6 ? 0.04 : 0;
-  confidence += recentHome.matches >= 4 && recentAway.matches >= 4 ? 0.05 : 0;
-  confidence += h2h.matches >= 2 ? 0.02 : 0;
-  confidence += bestBet === "GOAL" && dualScoringSupport >= 0.72 ? 0.03 : 0;
-  confidence += bestBet === "OVER 2.5" && expectedGoals >= 2.95 ? 0.03 : 0;
+  confidence += clamp(scoreGap / 24, 0, 1) * 0.05;
+  confidence += overallHome.matches >= 8 && overallAway.matches >= 8 ? 0.04 : 0;
+  confidence += splitHome.matches >= 4 && splitAway.matches >= 4 ? 0.04 : 0;
+  confidence += recentHome.matches >= 4 && recentAway.matches >= 4 ? 0.04 : 0;
+  confidence += h2h.matches >= 3 ? 0.01 : 0;
 
-  if (contextType === "cup") {
-    confidence -= 0.03;
-  }
+  if (bestBet === "GOAL" && goalSupportRate >= 0.65) confidence += 0.03;
+  if (bestBet === "OVER 2.5" && expectedGoals >= 2.85) confidence += 0.03;
+
+  if (contextType === "cup") confidence -= 0.03;
 
   confidence = clamp(confidence, 0.48, 0.82);
 
@@ -1042,9 +1166,11 @@ function evaluatePrematch(
     expectedGoals: round2(expectedGoals),
     goalSupportRate: round2(goalSupportRate),
     overSupportRate: round2(overSupportRate),
-    homeAttackIndex: round2(homeAttackIndex),
-    awayAttackIndex: round2(awayAttackIndex),
-    dualScoringSupport: round2(dualScoringSupport),
+    homeGoalProjection: round2(homeGoalProjection),
+    awayGoalProjection: round2(awayGoalProjection),
+    homeGoalSupport: round2(homeGoalSupport),
+    awayGoalSupport: round2(awayGoalSupport),
+    volumeSupport: round2(volumeSupport),
   };
 }
 
@@ -1088,8 +1214,10 @@ function buildPrematchCandidate(
 
 function buildPrematchPickFromEvaluation(
   f: any,
-  seasonHome: TeamSplitStats,
-  seasonAway: TeamSplitStats,
+  overallHome: TeamSplitStats,
+  overallAway: TeamSplitStats,
+  splitHome: TeamSplitStats,
+  splitAway: TeamSplitStats,
   recentHome: TeamSplitStats,
   recentAway: TeamSplitStats,
   h2h: H2HStats,
@@ -1108,43 +1236,43 @@ function buildPrematchPickFromEvaluation(
 
   const insightParts: string[] = [];
 
-  if (evaluated.contextType === "league") {
-    insightParts.push(
-      `${homeName} casa ${round2(seasonHome.avgGoalsFor)} fatti / ${round2(seasonHome.avgGoalsAgainst)} subiti`
-    );
-    insightParts.push(
-      `${awayName} fuori ${round2(seasonAway.avgGoalsFor)} fatti / ${round2(
-        seasonAway.avgGoalsAgainst
-      )} subiti`
-    );
-  } else {
-    insightParts.push(
-      `${homeName} ultime ${RECENT_MATCHES}: ${round2(recentHome.avgGoalsFor)} fatti / ${round2(
-        recentHome.avgGoalsAgainst
-      )} subiti`
-    );
-    insightParts.push(
-      `${awayName} ultime ${RECENT_MATCHES}: ${round2(recentAway.avgGoalsFor)} fatti / ${round2(
-        recentAway.avgGoalsAgainst
-      )} subiti`
-    );
-  }
-
+  insightParts.push(
+    `${homeName} totale ${overallHome.matches}: ${round2(overallHome.avgGoalsFor)} fatti / ${round2(
+      overallHome.avgGoalsAgainst
+    )} subiti`
+  );
+  insightParts.push(
+    `${awayName} totale ${overallAway.matches}: ${round2(overallAway.avgGoalsFor)} fatti / ${round2(
+      overallAway.avgGoalsAgainst
+    )} subiti`
+  );
+  insightParts.push(
+    `${homeName} casa ${splitHome.matches}: ${round2(splitHome.avgGoalsFor)} fatti / ${round2(
+      splitHome.avgGoalsAgainst
+    )} subiti`
+  );
+  insightParts.push(
+    `${awayName} fuori ${splitAway.matches}: ${round2(splitAway.avgGoalsFor)} fatti / ${round2(
+      splitAway.avgGoalsAgainst
+    )} subiti`
+  );
   insightParts.push(
     `forma ${RECENT_MATCHES}: ${round2(recentHome.avgTotalGoals)} + ${round2(
       recentAway.avgTotalGoals
     )}`
   );
 
-  if (h2h.matches >= 2) {
+  if (h2h.matches >= 3) {
     insightParts.push(`H2H ${h2h.matches}: ${round2(h2h.avgTotalGoals)} gol medi`);
   }
 
   if (evaluated.bestBet === "GOAL") {
     insightParts.push(
-      `indici rete ${round2(evaluated.homeAttackIndex)} / ${round2(evaluated.awayAttackIndex)}`
+      `proiezioni gol ${round2(evaluated.homeGoalProjection)} / ${round2(
+        evaluated.awayGoalProjection
+      )}`
     );
-    insightParts.push(`supporto gol ${pct(evaluated.dualScoringSupport)}`);
+    insightParts.push(`supporto goal ${pct(evaluated.goalSupportRate)}`);
   } else {
     insightParts.push(`stima match ${round2(evaluated.expectedGoals)} gol`);
     insightParts.push(`supporto over ${pct(evaluated.overSupportRate)}`);
@@ -1156,32 +1284,23 @@ function buildPrematchPickFromEvaluation(
 
   if (evaluated.bestBet === "GOAL") {
     reason =
-      `Profilo da GOAL: entrambe mostrano continuità realizzativa recente e una buona tendenza a concedere. ` +
-      `${homeName} ha indice rete ${round2(evaluated.homeAttackIndex)}, ` +
-      `${awayName} ${round2(evaluated.awayAttackIndex)}. ` +
-      `Il supporto combinato al gol di entrambe è ${pct(evaluated.dualScoringSupport)}.`;
+      `Profilo da GOAL: la lettura parte dai dati complessivi nella stessa competizione e viene confermata dagli split casa/trasferta. ` +
+      `${homeName} ha proiezione gol ${round2(evaluated.homeGoalProjection)}, ` +
+      `${awayName} ${round2(evaluated.awayGoalProjection)}. ` +
+      `Il supporto combinato alla rete di entrambe è ${pct(evaluated.goalSupportRate)}.`;
 
-    if (h2h.matches >= 2 && h2h.bttsRate >= 0.5) {
-      reason += ` Anche i testa a testa recenti non contrastano il profilo da GOAL.`;
-    }
-
-    if (evaluated.contextType === "cup") {
-      reason += ` Trattandosi di coppa, il cervello ha pesato di più la forma recente rispetto ai soli split casa/trasferta di stagione.`;
+    if (h2h.matches >= 3 && h2h.bttsRate >= 0.5) {
+      reason += ` I testa a testa aggiungono solo una conferma leggera e non guidano da soli il pick.`;
     }
   } else {
     reason =
-      `Profilo da OVER 2.5: il match ha una stima di circa ${round2(
-        evaluated.expectedGoals
-      )} gol e supporto over del ${pct(
+      `Profilo da OVER 2.5: il dato principale è il volume stimato del match nella stessa competizione, corretto da split casa/trasferta e forma recente. ` +
+      `La stima è di circa ${round2(evaluated.expectedGoals)} gol con supporto over del ${pct(
         evaluated.overSupportRate
-      )} tra struttura stagionale e forma recente.`;
+      )}.`;
 
-    if (h2h.matches >= 2 && h2h.over25Rate >= 0.5) {
-      reason += ` I testa a testa recenti sostengono ulteriormente il volume atteso del match.`;
-    }
-
-    if (evaluated.contextType === "cup") {
-      reason += ` Nelle coppe il peso maggiore è stato dato al momento recente delle due squadre.`;
+    if (h2h.matches >= 3 && h2h.over25Rate >= 0.5) {
+      reason += ` I testa a testa aggiungono un surplus, ma il pick nasce soprattutto dal volume atteso del match.`;
     }
   }
 
@@ -1226,7 +1345,7 @@ async function buildBrainPrematch(
   picks: PrematchPick[];
   candidates: PrematchCandidate[];
 }> {
-  const cacheKey = `brainPrematch_v10_context_clean_${date}_${maxMatches}`;
+  const cacheKey = `brainPrematch_v11_competition_clean_${date}_${maxMatches}`;
 
   const cached = getCache<{
     picks: PrematchPick[];
@@ -1260,16 +1379,16 @@ async function buildBrainPrematch(
 
   for (const f of upcoming) {
     const fixtureId = Number(f?.fixture?.id ?? 0);
-    const homeId = f?.teams?.home?.id ?? null;
-    const awayId = f?.teams?.away?.id ?? null;
+    const homeId = Number(f?.teams?.home?.id ?? 0);
+    const awayId = Number(f?.teams?.away?.id ?? 0);
     const season = getFixtureSeason(f);
-    const contextType: MatchContextType = isCupCompetition(f) ? "cup" : "league";
     const leagueId = Number(f?.league?.id ?? 0);
+    const contextType: MatchContextType = isCupCompetition(f) ? "cup" : "league";
     const leagueName = String(f?.league?.name ?? "");
     const homeName = String(f?.teams?.home?.name ?? "");
     const awayName = String(f?.teams?.away?.name ?? "");
 
-    if (!fixtureId || !homeId || !awayId) continue;
+    if (!fixtureId || !homeId || !awayId || !leagueId) continue;
 
     try {
       const oddsRaw = await getFixtureOddsLocal(fixtureId).catch(() => null);
@@ -1306,19 +1425,19 @@ async function buildBrainPrematch(
         continue;
       }
 
-      const [homeRecentRaw, awayRecentRaw, homeSeasonRaw, awaySeasonRaw] = await Promise.all([
-        getTeamLastFixturesLocal(homeId, RECENT_MATCHES).catch(() => null),
-        getTeamLastFixturesLocal(awayId, RECENT_MATCHES).catch(() => null),
-        getTeamSeasonFixturesLocal(homeId, season).catch(() => null),
-        getTeamSeasonFixturesLocal(awayId, season).catch(() => null),
+      const [homeCompetitionRaw, awayCompetitionRaw] = await Promise.all([
+        getTeamCompetitionFixturesLocal(homeId, season, leagueId).catch(() => null),
+        getTeamCompetitionFixturesLocal(awayId, season, leagueId).catch(() => null),
       ]);
 
-      const seasonHome = buildHomeOnlyStats(homeSeasonRaw, homeId);
-      const seasonAway = buildAwayOnlyStats(awaySeasonRaw, awayId);
-      const recentHome = buildRecentOverallStats(homeRecentRaw, homeId, RECENT_MATCHES);
-      const recentAway = buildRecentOverallStats(awayRecentRaw, awayId, RECENT_MATCHES);
+      const overallHome = buildOverallStats(homeCompetitionRaw, homeId);
+      const overallAway = buildOverallStats(awayCompetitionRaw, awayId);
+      const splitHome = buildHomeOnlyStats(homeCompetitionRaw, homeId);
+      const splitAway = buildAwayOnlyStats(awayCompetitionRaw, awayId);
+      const recentHome = buildRecentCompetitionStats(homeCompetitionRaw, homeId, RECENT_MATCHES);
+      const recentAway = buildRecentCompetitionStats(awayCompetitionRaw, awayId, RECENT_MATCHES);
 
-      if (seasonHome.matches < 4 || seasonAway.matches < 4) {
+      if (overallHome.matches < 6 || overallAway.matches < 6) {
         logDiscard("insufficient_scoring_data", {
           fixtureId,
           home: homeName,
@@ -1327,9 +1446,26 @@ async function buildBrainPrematch(
           goalOdd: odds.goal,
           over25Odd: odds.over25,
           extra: {
-            seasonHomeMatches: seasonHome.matches,
-            seasonAwayMatches: seasonAway.matches,
-            requiredSeasonMatches: 4,
+            overallHomeMatches: overallHome.matches,
+            overallAwayMatches: overallAway.matches,
+            requiredOverallMatches: 6,
+          },
+        });
+        continue;
+      }
+
+      if (splitHome.matches < 4 || splitAway.matches < 4) {
+        logDiscard("insufficient_scoring_data", {
+          fixtureId,
+          home: homeName,
+          away: awayName,
+          league: leagueName,
+          goalOdd: odds.goal,
+          over25Odd: odds.over25,
+          extra: {
+            splitHomeMatches: splitHome.matches,
+            splitAwayMatches: splitAway.matches,
+            requiredSplitMatches: 4,
           },
         });
         continue;
@@ -1357,8 +1493,10 @@ async function buildBrainPrematch(
 
       const evaluated = evaluatePrematch(
         f,
-        seasonHome,
-        seasonAway,
+        overallHome,
+        overallAway,
+        splitHome,
+        splitAway,
         recentHome,
         recentAway,
         h2h,
@@ -1402,8 +1540,10 @@ async function buildBrainPrematch(
       const candidate = buildPrematchCandidate(
         f,
         {
-          seasonHome,
-          seasonAway,
+          overallHome,
+          overallAway,
+          splitHome,
+          splitAway,
           recentHome,
           recentAway,
           h2h,
@@ -1417,8 +1557,10 @@ async function buildBrainPrematch(
 
       const pick = buildPrematchPickFromEvaluation(
         f,
-        seasonHome,
-        seasonAway,
+        overallHome,
+        overallAway,
+        splitHome,
+        splitAway,
         recentHome,
         recentAway,
         h2h,
@@ -1448,6 +1590,12 @@ async function buildBrainPrematch(
           recommendedBet: pick.recommendedBet,
           score: pick.score,
           confidence: pick.confidence,
+          contextType,
+          expectedGoals: evaluated.expectedGoals,
+          goalSupportRate: evaluated.goalSupportRate,
+          overSupportRate: evaluated.overSupportRate,
+          homeGoalProjection: evaluated.homeGoalProjection,
+          awayGoalProjection: evaluated.awayGoalProjection,
           goalOdd: pick.odds.goal,
           over25Odd: pick.odds.over25,
         });
@@ -1460,20 +1608,23 @@ async function buildBrainPrematch(
   }
 
   picks.sort((a, b) => {
-    const aRank = a.score * 0.78 + a.confidence * 100 * 0.22;
-    const bRank = b.score * 0.78 + b.confidence * 100 * 0.22;
+    const aRank = a.score * 0.76 + a.confidence * 100 * 0.24;
+    const bRank = b.score * 0.76 + b.confidence * 100 * 0.24;
     return bRank - aRank;
   });
 
   candidates.sort((a, b) => {
-    const aRecentAvg = (a.metrics.recentHome.avgTotalGoals + a.metrics.recentAway.avgTotalGoals) / 2;
-    const bRecentAvg = (b.metrics.recentHome.avgTotalGoals + b.metrics.recentAway.avgTotalGoals) / 2;
+    const aRecentAvg = avg([
+      a.metrics.recentHome.avgTotalGoals,
+      a.metrics.recentAway.avgTotalGoals,
+    ]);
+    const bRecentAvg = avg([
+      b.metrics.recentHome.avgTotalGoals,
+      b.metrics.recentAway.avgTotalGoals,
+    ]);
 
-    const aH2HBonus = a.metrics.h2h.matches > 0 ? a.metrics.h2h.avgTotalGoals * 1.5 : 0;
-    const bH2HBonus = b.metrics.h2h.matches > 0 ? b.metrics.h2h.avgTotalGoals * 1.5 : 0;
-
-    const aRank = a.serverPreAnalysis.preScore + aRecentAvg * 3 + aH2HBonus;
-    const bRank = b.serverPreAnalysis.preScore + bRecentAvg * 3 + bH2HBonus;
+    const aRank = a.serverPreAnalysis.preScore + aRecentAvg * 2.2;
+    const bRank = b.serverPreAnalysis.preScore + bRecentAvg * 2.2;
 
     return bRank - aRank;
   });
