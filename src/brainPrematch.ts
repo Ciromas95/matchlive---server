@@ -1199,7 +1199,8 @@ const overCandidate =
 }
 
   const competitionWeight = getCompetitionWeight(f);
-  const normalizedScore = clamp(rawScore * competitionWeight, 0, 100);
+  rawScore = clamp(rawScore, 0, 100);
+  let normalizedScore = clamp(rawScore * competitionWeight, 0, 100);
   const scoreGap = Math.abs(goalScore - overScore);
 
   let confidence = 0.42;
@@ -1210,7 +1211,31 @@ const overCandidate =
   confidence += recentHome.matches >= 4 && recentAway.matches >= 4 ? 0.04 : 0;
   confidence += h2h.matches >= 3 ? 0.01 : 0;
 
-  if (bestBet === "GOAL" && goalSupportRate >= 0.65) confidence += 0.03;
+  // Soft tuning GOAL: abbassa i pick borderline senza scartarli
+  if (bestBet === "GOAL") {
+    const weakestProjection = Math.min(homeGoalProjection, awayGoalProjection);
+
+    if (weakestProjection < 1.10) {
+      rawScore -= 6;
+      confidence -= 0.05;
+    }
+
+    if (goalSupportRate < 0.65) {
+      rawScore -= 4;
+      confidence -= 0.03;
+    }
+
+    if (h2h.matches >= 3 && h2h.avgTotalGoals < 2.20) {
+      rawScore -= 4;
+    }
+
+    rawScore = clamp(rawScore, 0, 100);
+
+    if (goalSupportRate >= 0.65) {
+      confidence += 0.03;
+    }
+  }
+
 if (bestBet === "OVER 2.5") {
   if (overSupportRate >= 0.68 && expectedGoals >= 2.90) confidence += 0.03;
   else if (overSupportRate < 0.60 || expectedGoals < 2.70) confidence -= 0.04;
