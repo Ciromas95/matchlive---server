@@ -158,6 +158,7 @@ type EvaluatedPrematch = {
   homeGoalSupport: number;
   awayGoalSupport: number;
   volumeSupport: number;
+  
 };
 
 const BASE_URL = "https://v3.football.api-sports.io";
@@ -165,8 +166,8 @@ const NOT_STARTED = new Set(["NS", "TBD"]);
 const FINISHED_STATUSES = new Set(["FT", "AET", "PEN"]);
 
 const MAX_PICKS_PER_LEAGUE = 2;
-const MIN_PICK_SCORE = 65;
-const MIN_CONFIDENCE = 0.56;
+const MIN_PICK_SCORE = 68;
+const MIN_CONFIDENCE = 0.60;
 const MIN_ODD = 1.45;
 const RECENT_MATCHES = 5;
 
@@ -1006,18 +1007,24 @@ function evaluatePrematch(
     goalScore -= 9;
   }
 
+  // Se una squadra domina troppo nella proiezione, il GOAL è meno pulito:
+// meglio lasciar emergere OVER 2.5 quando il volume è alto.
+if (Math.abs(homeGoalProjection - awayGoalProjection) >= 1.6) {
+  goalScore -= 8;
+}
+
   if (odds.goal != null) {
     if (odds.goal >= 1.55 && odds.goal <= 2.15) goalScore += 4;
     else if (odds.goal > 2.15 && odds.goal <= 2.65) goalScore += 2;
     else if (odds.goal < MIN_ODD) goalScore -= 8;
   }
 
-  let overScore = 0;
-  overScore += clamp(expectedGoals, 0, 4.3) * 20;
-  overScore += overSupportRate * 28;
-  overScore += clamp(volumeSupport, 0, 4.5) * 7;
-  overScore += Math.max(homeGoalProjection, awayGoalProjection) * 8;
-  overScore += h2hOverBonus;
+let overScore = 0;
+overScore += clamp(expectedGoals, 0, 4.0) * 14;
+overScore += overSupportRate * 34;
+overScore += clamp(volumeSupport, 0, 4.2) * 4;
+overScore += Math.max(homeGoalProjection, awayGoalProjection) * 5;
+overScore += h2hOverBonus;
 
   // penalità se volume non basta
   if (Math.min(homeGoalProjection, awayGoalProjection) < 0.8) {
@@ -1041,6 +1048,42 @@ function evaluatePrematch(
     else if (odds.over25 < MIN_ODD) overScore -= 8;
   }
 
+  // Se gli H2H sono molto chiusi e una squadra produce poco nello split,
+// l'OVER resta possibile ma non deve diventare un pick forte.
+if (
+  h2h.matches >= 4 &&
+  h2h.avgTotalGoals < 1.8 &&
+  Math.min(splitHome.avgGoalsFor, splitAway.avgGoalsFor) < 1.0
+) {
+  overScore = Math.min(overScore, 64);
+}
+
+  // Cap anti-OVER gonfiato: evita score 100 con supporto reale medio/basso
+if (overSupportRate < 0.56 || expectedGoals < 2.60) {
+  overScore = Math.min(overScore, 68);
+}
+
+if (overSupportRate < 0.60 || expectedGoals < 2.70) {
+  overScore = Math.min(overScore, 76);
+}
+
+if (overSupportRate < 0.64 || expectedGoals < 2.85) {
+  overScore = Math.min(overScore, 84);
+}
+
+// Se una squadra ha poca produzione offensiva, l'OVER non deve esplodere solo perché subisce tanto
+if (
+  Math.min(homeGoalProjection, awayGoalProjection) < 0.95 ||
+  Math.min(splitHome.avgGoalsFor, splitAway.avgGoalsFor) < 0.90
+) {
+  overScore = Math.min(overScore, 78);
+}
+
+// H2H contrari: non guidano il pick, ma devono frenare gli OVER troppo alti
+if (h2h.matches >= 4 && h2h.avgTotalGoals < 2.2 && h2h.over25Rate < 0.35) {
+  overScore = Math.min(overScore, 76);
+}
+
   // In coppa riduco leggermente affidabilità strutturale
   if (contextType === "cup") {
     goalScore -= 2;
@@ -1051,23 +1094,24 @@ function evaluatePrematch(
   const goalQuoteOk = odds.goal != null && odds.goal >= MIN_ODD;
   const overQuoteOk = odds.over25 != null && odds.over25 >= MIN_ODD;
 
-  const goalCandidate =
-    goalQuoteOk &&
-    homeGoalProjection >= 0.95 &&
-    awayGoalProjection >= 0.95 &&
-    homeGoalSupport >= 0.60 &&
-    awayGoalSupport >= 0.60 &&
-    goalSupportRate >= 0.57 &&
-    homeFailRisk <= 0.42 &&
-    awayFailRisk <= 0.42 &&
-    goalScore >= 62;
+const goalCandidate =
+  goalQuoteOk &&
+  homeGoalProjection >= 0.92 &&
+  awayGoalProjection >= 0.92 &&
+  homeGoalSupport >= 0.57 &&
+  awayGoalSupport >= 0.57 &&
+  goalSupportRate >= 0.55 &&
+  homeFailRisk <= 0.45 &&
+  awayFailRisk <= 0.45 &&
+  goalScore >= 58;
 
-  const overCandidate =
-    overQuoteOk &&
-    expectedGoals >= 2.45 &&
-    overSupportRate >= 0.52 &&
-    Math.max(homeGoalProjection, awayGoalProjection) >= 1.15 &&
-    overScore >= 62;
+const overCandidate =
+  overQuoteOk &&
+  expectedGoals >= 2.55 &&
+  overSupportRate >= 0.56 &&
+  Math.max(homeGoalProjection, awayGoalProjection) >= 1.20 &&
+  avg([recentHome.avgTotalGoals, recentAway.avgTotalGoals]) >= 2.35 &&
+  overScore >= 64;
 
   prematchDebug("evaluate_prematch", {
     fixtureId: f?.fixture?.id ?? null,
@@ -1131,10 +1175,28 @@ function evaluatePrematch(
   } else if (goalCandidate) {
     bestBet = "GOAL";
     rawScore = goalScore;
-  } else if (overCandidate) {
+} else if (overCandidate) {
+  const overIsFragile =
+    h2h.matches >= 4 &&
+    h2h.avgTotalGoals < 1.8 &&
+    Math.min(splitHome.avgGoalsFor, splitAway.avgGoalsFor) < 1.0;
+
+  if (
+    overIsFragile &&
+    goalQuoteOk &&
+    homeGoalProjection >= 1.05 &&
+    awayGoalProjection >= 0.95 &&
+    goalSupportRate >= 0.56 &&
+    Math.min(homeGoalSupport, awayGoalSupport) >= 0.58 &&
+    goalScore >= 58
+  ) {
+    bestBet = "GOAL";
+    rawScore = Math.min(goalScore, 72);
+  } else {
     bestBet = "OVER 2.5";
     rawScore = overScore;
   }
+}
 
   const competitionWeight = getCompetitionWeight(f);
   const normalizedScore = clamp(rawScore * competitionWeight, 0, 100);
@@ -1149,7 +1211,11 @@ function evaluatePrematch(
   confidence += h2h.matches >= 3 ? 0.01 : 0;
 
   if (bestBet === "GOAL" && goalSupportRate >= 0.65) confidence += 0.03;
-  if (bestBet === "OVER 2.5" && expectedGoals >= 2.85) confidence += 0.03;
+if (bestBet === "OVER 2.5") {
+  if (overSupportRate >= 0.68 && expectedGoals >= 2.90) confidence += 0.03;
+  else if (overSupportRate < 0.60 || expectedGoals < 2.70) confidence -= 0.04;
+  else if (overSupportRate < 0.64 || expectedGoals < 2.85) confidence -= 0.02;
+}
 
   if (contextType === "cup") confidence -= 0.03;
 
@@ -1225,7 +1291,8 @@ function buildPrematchPickFromEvaluation(
   evaluated: EvaluatedPrematch
 ): PrematchPick | null {
   if (!evaluated.bestBet) return null;
-  if (evaluated.normalizedScore < MIN_PICK_SCORE) return null;
+  const minScoreForBet = evaluated.bestBet === "GOAL" ? 62 : MIN_PICK_SCORE;
+  if (evaluated.normalizedScore < minScoreForBet) return null;
   if (evaluated.confidence < MIN_CONFIDENCE) return null;
 
   const selectedOdd = evaluated.bestBet === "GOAL" ? odds.goal : odds.over25;
@@ -1345,7 +1412,7 @@ async function buildBrainPrematch(
   picks: PrematchPick[];
   candidates: PrematchCandidate[];
 }> {
-  const cacheKey = `brainPrematch_v11_competition_clean_${date}_${maxMatches}`;
+  const cacheKey = `brainPrematch_v20_quality_filter_${date}_${maxMatches}`;
 
   const cached = getCache<{
     picks: PrematchPick[];
