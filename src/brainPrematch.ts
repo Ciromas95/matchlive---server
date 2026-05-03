@@ -1066,22 +1066,49 @@ if (overSupportRate < 0.56 || expectedGoals < 2.60) {
 if (overSupportRate < 0.60 || expectedGoals < 2.70) {
   overScore = Math.min(overScore, 76);
 }
+// OVER con supporto appena sufficiente: resta pick, ma non deve sembrare fortissimo
+if (overSupportRate < 0.62) {
+  overScore = Math.min(overScore, 72);
+}
 
 if (overSupportRate < 0.64 || expectedGoals < 2.85) {
   overScore = Math.min(overScore, 84);
 }
 
 // Se una squadra ha poca produzione offensiva, l'OVER non deve esplodere solo perché subisce tanto
-if (
-  Math.min(homeGoalProjection, awayGoalProjection) < 0.95 ||
-  Math.min(splitHome.avgGoalsFor, splitAway.avgGoalsFor) < 0.90
-) {
-  overScore = Math.min(overScore, 78);
+// Se una squadra produce poco nello split specifico, l'OVER non deve diventare un pick forte
+const weakestSplitAttack = Math.min(splitHome.avgGoalsFor, splitAway.avgGoalsFor);
+const weakestProjection = Math.min(homeGoalProjection, awayGoalProjection);
+
+if (weakestSplitAttack <= 0.90 || weakestProjection < 0.95) {
+  overScore = Math.min(overScore, 72);
+} else if (weakestSplitAttack <= 1.00) {
+  overScore = Math.min(overScore, 74);
+} else if (weakestSplitAttack <= 1.10 && overSupportRate < 0.66) {
+  overScore = Math.min(overScore, 76);
 }
 
 // H2H contrari: non guidano il pick, ma devono frenare gli OVER troppo alti
 if (h2h.matches >= 4 && h2h.avgTotalGoals < 2.2 && h2h.over25Rate < 0.35) {
   overScore = Math.min(overScore, 76);
+}
+
+// Se il supporto OVER è medio e almeno una squadra segna poco, resta pick borderline
+if (
+  overSupportRate < 0.65 &&
+  weakestSplitAttack <= 1.05
+) {
+  overScore = Math.min(overScore, 72);
+}
+
+// Se la quota Under è più bassa o simile alla quota Over, il mercato non sta spingendo forte OVER
+if (
+  odds.under25 != null &&
+  odds.over25 != null &&
+  odds.under25 <= odds.over25 + 0.05 &&
+  overSupportRate < 0.66
+) {
+  overScore = Math.min(overScore, 72);
 }
 
   // In coppa riduco leggermente affidabilità strutturale
@@ -1093,6 +1120,11 @@ if (h2h.matches >= 4 && h2h.avgTotalGoals < 2.2 && h2h.over25Rate < 0.35) {
 
   const goalQuoteOk = odds.goal != null && odds.goal >= MIN_ODD;
   const overQuoteOk = odds.over25 != null && odds.over25 >= MIN_ODD;
+
+  const marketAgainstOver =
+  odds.under25 != null &&
+  odds.over25 != null &&
+  odds.under25 < odds.over25;
 
 const goalCandidate =
   goalQuoteOk &&
@@ -1107,11 +1139,16 @@ const goalCandidate =
 
 const overCandidate =
   overQuoteOk &&
-  expectedGoals >= 2.55 &&
-  overSupportRate >= 0.56 &&
+  expectedGoals >= 2.60 &&
+  overSupportRate >= 0.58 &&
   Math.max(homeGoalProjection, awayGoalProjection) >= 1.20 &&
   avg([recentHome.avgTotalGoals, recentAway.avgTotalGoals]) >= 2.35 &&
-  overScore >= 64;
+  weakestSplitAttack >= 0.95 &&
+  !(
+    marketAgainstOver &&
+    overSupportRate < 0.65
+  ) &&
+  overScore >= 66;
 
   prematchDebug("evaluate_prematch", {
     fixtureId: f?.fixture?.id ?? null,
@@ -1437,7 +1474,7 @@ async function buildBrainPrematch(
   picks: PrematchPick[];
   candidates: PrematchCandidate[];
 }> {
-  const cacheKey = `brainPrematch_v20_quality_filter_${date}_${maxMatches}`;
+  const cacheKey = `brainPrematch_v23_market_over_filter_${date}_${maxMatches}`;
 
   const cached = getCache<{
     picks: PrematchPick[];
