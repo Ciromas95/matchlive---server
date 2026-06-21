@@ -42,6 +42,8 @@ type CacheMetrics = {
   missesToday: number;
 };
 
+const DAILY_API_BUDGET = Number(process.env.API_DAILY_BUDGET ?? "75000");
+
 let lastResetDay = new Date().toISOString().slice(0, 10);
 
 const provider: ProviderMetrics = {
@@ -187,6 +189,13 @@ export function markBrainLiveStatsCacheHit(count: number = 1) {
 
 export function getApiStats() {
   resetIfNeeded();
+  const externalToday = provider.callsToday;
+  const memoryServedToday = cache.hitsToday;
+  const memoryTotalToday = cache.hitsToday + cache.missesToday;
+  const memorySaveRate = memoryTotalToday > 0 ? cache.hitsToday / memoryTotalToday : 0;
+  const usedPct = DAILY_API_BUDGET > 0 ? externalToday / DAILY_API_BUDGET : 0;
+  const topExternal = readableProviderUsage(provider.byTypeToday);
+  const topAppSections = readableEndpointUsage(traffic.endpointByPathToday);
 
   return {
     provider: {
@@ -229,5 +238,87 @@ export function getApiStats() {
       cacheHits: cache.hitsTotal,
       cacheMisses: cache.missesTotal,
     },
+    readable: {
+      dailyBudget: DAILY_API_BUDGET,
+      externalCallsToday: externalToday,
+      externalCallsLastMinute: provider.callsLastMinute,
+      externalBudgetUsedPct: usedPct,
+      externalCallsRemainingEstimate:
+        DAILY_API_BUDGET > 0 ? Math.max(0, DAILY_API_BUDGET - externalToday) : null,
+      memoryServedToday,
+      memorySaveRate,
+      appRequestsToday: traffic.appRequestsToday,
+      appRequestsLastMinute: traffic.appRequestsLastMinute,
+      mostExpensiveSections: topExternal,
+      mostUsedAppSections: topAppSections,
+      status: getReadableStatus(usedPct),
+    },
   };
+}
+
+function getReadableStatus(usedPct: number) {
+  if (usedPct >= 0.9) {
+    return {
+      label: "Risparmio forte",
+      description:
+        "Hai superato il 90% del budget giornaliero: conviene servire più dati dalla memoria del server.",
+    };
+  }
+  if (usedPct >= 0.7) {
+    return {
+      label: "Attenzione",
+      description:
+        "Consumo alto ma ancora gestibile. Il server può rallentare gli aggiornamenti meno urgenti.",
+    };
+  }
+  return {
+    label: "Normale",
+    description: "Consumo sotto controllo. Il live classico resta in corsia veloce.",
+  };
+}
+
+function readableProviderUsage(byType: Record<CounterKey, number>) {
+  const labels: Record<CounterKey, string> = {
+    live: "Live classico",
+    compact: "Liste partite",
+    events: "Eventi partita",
+    stats: "Statistiche",
+    lineups: "Formazioni",
+    brainPrematch: "Cervello Prematch",
+    brainLive: "Cervello Live",
+    other: "Altro",
+  };
+
+  return Object.entries(byType)
+    .map(([key, value]) => ({
+      key,
+      label: labels[key as CounterKey] ?? key,
+      calls: Number(value) || 0,
+    }))
+    .filter((x) => x.calls > 0)
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 8);
+}
+
+function readableEndpointUsage(byPath: Record<string, number>) {
+  return Object.entries(byPath)
+    .map(([path, requests]) => ({
+      path,
+      label: readablePath(path),
+      requests: Number(requests) || 0,
+    }))
+    .filter((x) => x.requests > 0)
+    .sort((a, b) => b.requests - a.requests)
+    .slice(0, 8);
+}
+
+function readablePath(path: string) {
+  if (path.includes("/api/live/compact")) return "Schermata Live";
+  if (path.includes("/api/live")) return "Live classico";
+  if (path.includes("/api/brain/prematch")) return "Cervello Prematch";
+  if (path.includes("/api/brain/live")) return "Cervello Live";
+  if (path.includes("/api/league/fixtures")) return "Partite campionato";
+  if (path.includes("/api/metrics/heartbeat")) return "Utenti online";
+  if (path.includes("/api/admin")) return "Pannello admin";
+  return path.replace(/^GET /, "").replace(/^POST /, "");
 }

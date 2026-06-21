@@ -1,8 +1,9 @@
 import axios from "axios";
-import { getCache, setCache } from "./cache";
+import { getCache, getCacheState, setCache } from "./cache";
+import { getInflight, runOnce } from "./inflight";
 import { markApiCall, markCacheHit, markCacheMiss } from "./stats";
 
-const PREMATCH_DEBUG = true;
+const PREMATCH_DEBUG = (process.env.PREMATCH_DEBUG ?? "false").toLowerCase() === "true";
 
 function prematchDebug(label: string, payload?: Record<string, unknown>) {
   if (!PREMATCH_DEBUG) return;
@@ -396,10 +397,11 @@ async function getFixturesByDateLocal(date: string): Promise<any> {
 
   markCacheMiss();
 
-  const data = await apiGet("/fixtures", { date });
-  setCache(cacheKey, data, 600);
-
-  return data;
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/fixtures", { date });
+    setCache(cacheKey, data, 600, 30 * 60);
+    return data;
+  });
 }
 
 async function getTeamCompetitionFixturesLocal(
@@ -417,14 +419,16 @@ async function getTeamCompetitionFixturesLocal(
 
   markCacheMiss();
 
-  const data = await apiGet("/fixtures", {
-    team: teamId,
-    season,
-    league: leagueId,
-  });
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/fixtures", {
+      team: teamId,
+      season,
+      league: leagueId,
+    });
 
-  setCache(cacheKey, data, 6 * 60 * 60);
-  return data;
+    setCache(cacheKey, data, 6 * 60 * 60, 24 * 60 * 60);
+    return data;
+  });
 }
 
 async function getHeadToHeadLocal(homeId: number, awayId: number): Promise<any> {
@@ -438,13 +442,15 @@ async function getHeadToHeadLocal(homeId: number, awayId: number): Promise<any> 
 
   markCacheMiss();
 
-  const data = await apiGet("/fixtures/headtohead", {
-    h2h: `${homeId}-${awayId}`,
-    last: 5,
-  });
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/fixtures/headtohead", {
+      h2h: `${homeId}-${awayId}`,
+      last: 5,
+    });
 
-  setCache(cacheKey, data, 6 * 60 * 60);
-  return data;
+    setCache(cacheKey, data, 6 * 60 * 60, 24 * 60 * 60);
+    return data;
+  });
 }
 
 async function getFixtureOddsLocal(fixtureId: number): Promise<any> {
@@ -458,10 +464,11 @@ async function getFixtureOddsLocal(fixtureId: number): Promise<any> {
 
   markCacheMiss();
 
-  const data = await apiGet("/odds", { fixture: fixtureId });
-  setCache(cacheKey, data, 15 * 60);
-
-  return data;
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/odds", { fixture: fixtureId });
+    setCache(cacheKey, data, 15 * 60, 2 * 60 * 60);
+    return data;
+  });
 }
 
 function extractOddsSnapshot(raw: any): OddsSnapshot {
@@ -1473,18 +1480,55 @@ async function buildBrainPrematch(
 ): Promise<{
   picks: PrematchPick[];
   candidates: PrematchCandidate[];
+  cacheState?: "fresh" | "stale" | "miss";
 }> {
   const cacheKey = `brainPrematch_v23_market_over_filter_${date}_${maxMatches}`;
 
-  const cached = getCache<{
+  const cached = getCacheState<{
     picks: PrematchPick[];
     candidates: PrematchCandidate[];
   }>(cacheKey);
 
-  if (cached) {
-    return cached;
+  if (cached.state === "fresh" && cached.value) {
+    markCacheHit();
+    return { ...cached.value, cacheState: "fresh" };
   }
 
+  const running = getInflight<{
+    picks: PrematchPick[];
+    candidates: PrematchCandidate[];
+  }>(cacheKey);
+
+  if (running) {
+    if (cached.state === "stale" && cached.value) {
+      markCacheHit();
+      return { ...cached.value, cacheState: "stale" };
+    }
+    const fresh = await running;
+    return { ...fresh, cacheState: "fresh" };
+  }
+
+  if (cached.state === "stale" && cached.value) {
+    markCacheHit();
+    void runOnce(cacheKey, () => computeBrainPrematch(date, maxMatches, cacheKey)).catch((e) => {
+      console.error("[brainPrematch] background refresh failed:", e?.message ?? e);
+    });
+    return { ...cached.value, cacheState: "stale" };
+  }
+
+  markCacheMiss();
+  const fresh = await runOnce(cacheKey, () => computeBrainPrematch(date, maxMatches, cacheKey));
+  return { ...fresh, cacheState: "miss" };
+}
+
+async function computeBrainPrematch(
+  date: string,
+  maxMatches: number,
+  cacheKey: string
+): Promise<{
+  picks: PrematchPick[];
+  candidates: PrematchCandidate[];
+}> {
   const raw = await getFixturesByDateLocal(date);
   const fixtures = Array.isArray(raw?.response) ? raw.response : [];
   const MAX_PREMATCH_ANALYSIS = 28;
@@ -1791,7 +1835,7 @@ async function buildBrainPrematch(
     candidates: finalCandidates,
   };
 
-  setCache(cacheKey, result, 1200);
+  setCache(cacheKey, result, 30 * 60, 6 * 60 * 60);
   return result;
 }
 

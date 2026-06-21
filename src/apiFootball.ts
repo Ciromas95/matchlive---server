@@ -1,5 +1,6 @@
 import axios from "axios";
-import { getCache, setCache } from "./cache";
+import { getCache, getCacheState, setCache } from "./cache";
+import { getInflight, runOnce } from "./inflight";
 import { CounterKey, markApiCall, markCacheHit, markCacheMiss } from "./stats";
 import { liveTtlMs } from "./ttl";
 
@@ -33,8 +34,6 @@ const BRAIN_LIVE_LIVE_PARAM = BRAIN_LIVE_LEAGUE_IDS.join("-");
  * Se più endpoint chiedono la stessa chiave cache mentre è scaduta,
  * parte una sola chiamata esterna e gli altri aspettano la stessa Promise.
  */
-const inflight = new Map<string, Promise<any>>();
-
 function apiKey(): string {
   const key = process.env.API_FOOTBALL_KEY;
   if (!key) {
@@ -65,7 +64,8 @@ async function apiGet(
 async function fetchWithCache<T>(
   cacheKey: string,
   ttlSeconds: number,
-  fetcher: () => Promise<T>
+  fetcher: () => Promise<T>,
+  staleSeconds: number = 10 * 60
 ): Promise<T> {
   const cached = getCache<T>(cacheKey);
   if (cached) {
@@ -73,7 +73,7 @@ async function fetchWithCache<T>(
     return cached;
   }
 
-  const running = inflight.get(cacheKey);
+  const running = getInflight<T>(cacheKey);
   if (running) {
     markCacheHit();
     return running;
@@ -81,18 +81,54 @@ async function fetchWithCache<T>(
 
   markCacheMiss();
 
-  const p = (async () => {
-    try {
-      const fresh = await fetcher();
-      setCache(cacheKey, fresh, ttlSeconds);
-      return fresh;
-    } finally {
-      inflight.delete(cacheKey);
-    }
-  })();
+  return runOnce(cacheKey, async () => {
+    const fresh = await fetcher();
+    setCache(cacheKey, fresh, ttlSeconds, staleSeconds);
+    return fresh;
+  });
+}
 
-  inflight.set(cacheKey, p);
-  return p;
+async function fetchStaleWhileRevalidate<T>(
+  cacheKey: string,
+  ttlSeconds: number,
+  staleSeconds: number,
+  fetcher: () => Promise<T>
+): Promise<T> {
+  const cached = getCacheState<T>(cacheKey);
+
+  if (cached.state === "fresh" && cached.value != null) {
+    markCacheHit();
+    return cached.value;
+  }
+
+  const running = getInflight<T>(cacheKey);
+  if (running) {
+    if (cached.state === "stale" && cached.value != null) {
+      markCacheHit();
+      return cached.value;
+    }
+    markCacheHit();
+    return running;
+  }
+
+  if (cached.state === "stale" && cached.value != null) {
+    markCacheHit();
+    void runOnce(cacheKey, async () => {
+      const fresh = await fetcher();
+      setCache(cacheKey, fresh, ttlSeconds, staleSeconds);
+      return fresh;
+    }).catch((e) => {
+      console.error("[cache] background refresh failed:", e?.message ?? e);
+    });
+    return cached.value;
+  }
+
+  markCacheMiss();
+  return runOnce(cacheKey, async () => {
+    const fresh = await fetcher();
+    setCache(cacheKey, fresh, ttlSeconds, staleSeconds);
+    return fresh;
+  });
 }
 
 /**
@@ -102,22 +138,10 @@ async function fetchWithCache<T>(
 export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
   const cacheKey = "liveFixtures_all";
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  const running = inflight.get(cacheKey);
-  if (running) {
-    markCacheHit();
-    return running;
-  }
-
-  markCacheMiss();
-
-  const p = (async () => {
-    try {
+  return fetchWithCache<any>(
+    cacheKey,
+    5,
+    async () => {
       const data = await apiGet("/fixtures", type, { live: "all" });
 
       const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
@@ -126,19 +150,15 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
        * Manteniamo un minimo reale per evitare raffiche inutili.
        */
       const ttlSeconds = Math.max(
-        12,
+        5,
         Math.round(liveTtlMs(liveCount) / 1000)
       );
 
-      setCache(cacheKey, data, ttlSeconds);
+      setCache(cacheKey, data, ttlSeconds, 20);
       return data;
-    } finally {
-      inflight.delete(cacheKey);
-    }
-  })();
-
-  inflight.set(cacheKey, p);
-  return p;
+    },
+    20
+  );
 }
 
 /**
@@ -148,22 +168,11 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
 export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promise<any> {
   const cacheKey = `liveFixtures_top_${BRAIN_LIVE_LIVE_PARAM}`;
 
-  const cached = getCache<any>(cacheKey);
-  if (cached) {
-    markCacheHit();
-    return cached;
-  }
-
-  const running = inflight.get(cacheKey);
-  if (running) {
-    markCacheHit();
-    return running;
-  }
-
-  markCacheMiss();
-
-  const p = (async () => {
-    try {
+  return fetchStaleWhileRevalidate<any>(
+    cacheKey,
+    20,
+    120,
+    async () => {
       const data = await apiGet("/fixtures", type, {
         live: BRAIN_LIVE_LIVE_PARAM,
       });
@@ -179,15 +188,10 @@ export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promis
         Math.round(liveTtlMs(liveCount) / 1000)
       );
 
-      setCache(cacheKey, data, ttlSeconds);
+      setCache(cacheKey, data, ttlSeconds, 120);
       return data;
-    } finally {
-      inflight.delete(cacheKey);
     }
-  })();
-
-  inflight.set(cacheKey, p);
-  return p;
+  );
 }
 
 export async function getLeagueFixturesByDate(
@@ -229,7 +233,7 @@ export async function getFixturesByDate(
 ): Promise<any> {
   const cacheKey = `fixturesByDate_${date}`;
 
-  return fetchWithCache<any>(cacheKey, 600, async () => {
+  return fetchStaleWhileRevalidate<any>(cacheKey, 600, 30 * 60, async () => {
     return apiGet("/fixtures", type, { date });
   });
 }

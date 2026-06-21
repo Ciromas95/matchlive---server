@@ -9,7 +9,8 @@ import { toLiveCompact } from "./compact";
 import { addClient, removeClient } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
-import { cacheSize } from "./cache";
+import { cacheSize, cacheSnapshot } from "./cache";
+import { inflightSize } from "./inflight";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
 import brainLiveRouter from "./routes/brainLive";
@@ -235,10 +236,16 @@ app.post("/api/admin/login", (req: Request, res: Response) => {
 
 app.get("/api/admin/stats", requireAdminToken, (_req: Request, res: Response) => {
   ensureUsersDay();
+  const stats = getApiStats();
+  const cache = cacheSnapshot();
 
   return res.json({
-    ...getApiStats(),
+    ...stats,
     cacheSize: cacheSize(),
+    serverMemory: cache,
+    workInProgress: {
+      externalUpdatesRunning: inflightSize(),
+    },
     users: {
       onlineNow: computeOnlineNow(),
       dauToday: usersSeenToday.size,
@@ -376,6 +383,7 @@ app.get("/api/stats", (_req: Request, res: Response) => {
   return res.json({
     ...getApiStats(),
     cacheSize: cacheSize(),
+    serverMemory: cacheSnapshot(),
   });
 });
 
@@ -395,7 +403,9 @@ if (process.env.ENABLE_POLLER !== "false") {
   startPoller();
 }
 console.log("brainLive exports:", Object.keys(brainLiveModule));
-brainLiveModule.startBrainLivePoller(8);
+if (process.env.ENABLE_BRAIN_LIVE_POLLER !== "false") {
+  brainLiveModule.startBrainLivePoller(8);
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

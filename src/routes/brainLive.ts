@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import {
+  buildBrainLive,
   getBrainLiveFromCache,
   getDefaultBrainLivePayload,
 } from "../brainLive";
@@ -14,8 +15,9 @@ brainLiveRouter.get("/live", async (req: Request, res: Response) => {
     const maxResults = Math.max(1, Math.min(maxResultsParam || 8, 12));
 
     const cached = getBrainLiveFromCache(maxResults);
+    const onDemand = cached ? null : await buildBrainLive(maxResults);
     const fallback = getDefaultBrainLivePayload(maxResults);
-    const rawResult: any = cached ?? fallback;
+    const rawResult: any = cached ?? onDemand?.result ?? fallback;
 
     const candidates = Array.isArray(rawResult?.candidates)
       ? rawResult.candidates
@@ -24,6 +26,7 @@ brainLiveRouter.get("/live", async (req: Request, res: Response) => {
     return res.json({
       updatedAt: new Date().toISOString(),
       cached: Boolean(cached),
+      generatedNow: Boolean(!cached && onDemand),
       results: candidates.length,
 
       // nuovo payload

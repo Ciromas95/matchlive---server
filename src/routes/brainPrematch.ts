@@ -30,15 +30,16 @@ brainPrematchRouter.get("/prematch", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Missing date" });
     }
 
-const result = await buildBrainPrematch(date, maxMatches);
+    const result = await buildBrainPrematch(date, maxMatches);
 
-return res.json({
-  updatedAt: new Date().toISOString(),
-  date,
-  results: result.picks.length,
-  picks: result.picks,
-  candidates: result.candidates,
-});
+    return res.json({
+      updatedAt: new Date().toISOString(),
+      date,
+      results: result.picks.length,
+      picks: result.picks,
+      candidates: result.candidates,
+      cacheState: result.cacheState ?? "fresh",
+    });
 
   } catch (e: any) {
     const status = e?.response?.status;
