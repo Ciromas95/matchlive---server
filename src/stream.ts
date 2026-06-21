@@ -6,6 +6,7 @@ type Client = {
 };
 
 let clients: Client[] = [];
+const MAX_SSE_CLIENTS = Number(process.env.MAX_SSE_CLIENTS ?? "2000");
 
 // ===============================
 // SSE DEDUPE (anti-duplicati goal)
@@ -57,10 +58,20 @@ function shouldEmitGoal(p: any) {
 }
 
 export function addClient(res: Response, types: string[]) {
+  if (clients.length >= MAX_SSE_CLIENTS) {
+    res.status(429).json({
+      error: "stream_busy",
+      message: "Troppi utenti collegati allo stream: usa refresh cache.",
+      retryAfterSeconds: 20,
+    });
+    return false;
+  }
+
   clients.push({
     res,
     types: new Set(types.map(t => t.toLowerCase()))
   });
+  return true;
 }
 
 export function removeClient(res: Response) {

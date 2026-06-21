@@ -23,6 +23,55 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+function setSharedCache(res: Response, seconds: number) {
+  const safe = Math.max(1, Math.min(seconds, 60));
+  res.setHeader(
+    "Cache-Control",
+    `public, max-age=1, s-maxage=${safe}, stale-while-revalidate=${safe * 3}`
+  );
+}
+
+// Protezione leggera anti-raffica. Non serve a "bloccare utenti normali",
+// serve a impedire loop aggressivi o refresh martellanti dallo stesso IP.
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS ?? "60000");
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX ?? "240");
+const rateBuckets = new Map<string, { start: number; count: number }>();
+
+function rateLimitApi(req: Request, res: Response, next: NextFunction) {
+  if (req.path.startsWith("/admin") || req.path.startsWith("/stream")) {
+    return next();
+  }
+
+  const key = `${req.ip}:${req.path}`;
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+
+  if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW_MS) {
+    rateBuckets.set(key, { start: now, count: 1 });
+    return next();
+  }
+
+  bucket.count += 1;
+  if (bucket.count > RATE_LIMIT_MAX) {
+    res.setHeader("Retry-After", "10");
+    return res.status(429).json({
+      error: "too_many_requests",
+      message: "Troppi refresh ravvicinati. Riprova tra pochi secondi.",
+    });
+  }
+
+  return next();
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets.entries()) {
+    if (now - bucket.start > RATE_LIMIT_WINDOW_MS * 2) {
+      rateBuckets.delete(key);
+    }
+  }
+}, 60_000);
+
 // ===============================
 // Users metrics (anonymous heartbeat) — in memory
 // ===============================
@@ -172,6 +221,8 @@ app.use("/api", (req: Request, _res: Response, next: NextFunction) => {
   next();
 });
 
+app.use("/api", rateLimitApi);
+
 // ===============================
 // Metrics heartbeat
 // ===============================
@@ -259,6 +310,7 @@ app.get("/api/admin/stats", requireAdminToken, (_req: Request, res: Response) =>
 // ===============================
 app.get("/api/live", async (_req: Request, res: Response) => {
   try {
+    setSharedCache(res, 5);
     const data = await apiFootball.getLiveFixtures("live");
     return res.json(data);
   } catch (e: any) {
@@ -272,6 +324,7 @@ app.get("/api/live", async (_req: Request, res: Response) => {
 
 app.get("/api/live/compact", async (_req: Request, res: Response) => {
   try {
+    setSharedCache(res, 5);
     const data = await apiFootball.getLiveFixtures("compact");
     const fixtures = await toLiveCompact(data);
 
@@ -342,20 +395,21 @@ app.use("/api/brain", brainLiveRouter);
 // SSE stream
 // ===============================
 app.get("/api/stream", (req: Request, res: Response) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  res.write(`data: ${JSON.stringify({ type: "hello" })}\n\n`);
-
   const typesParam = (req.query.types as string | undefined) ?? "";
   const types = typesParam
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
 
-  addClient(res, types);
+  const accepted = addClient(res, types);
+  if (!accepted) return;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  res.write(`data: ${JSON.stringify({ type: "hello" })}\n\n`);
 
   const heartbeat = setInterval(() => {
     try {

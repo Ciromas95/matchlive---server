@@ -137,28 +137,54 @@ async function fetchStaleWhileRevalidate<T>(
  */
 export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
   const cacheKey = "liveFixtures_all";
+  const cached = getCacheState<any>(cacheKey);
 
-  return fetchWithCache<any>(
-    cacheKey,
-    5,
-    async () => {
-      const data = await apiGet("/fixtures", type, { live: "all" });
+  if (cached.state === "fresh" && cached.value != null) {
+    markCacheHit();
+    return cached.value;
+  }
 
-      const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
+  const running = getInflight<any>(cacheKey);
+  if (running) {
+    if (cached.state === "stale" && cached.value != null) {
+      markCacheHit();
+      return cached.value;
+    }
+    markCacheHit();
+    return running;
+  }
 
-      /**
-       * Manteniamo un minimo reale per evitare raffiche inutili.
-       */
-      const ttlSeconds = Math.max(
-        5,
-        Math.round(liveTtlMs(liveCount) / 1000)
-      );
+  if (cached.state === "stale" && cached.value != null) {
+    markCacheHit();
+    void runOnce(cacheKey, async () => {
+      const fresh = await apiGet("/fixtures", type, { live: "all" });
+      const liveCount = Array.isArray(fresh?.response) ? fresh.response.length : 0;
+      const ttlSeconds = Math.max(5, Math.round(liveTtlMs(liveCount) / 1000));
+      setCache(cacheKey, fresh, ttlSeconds, 20);
+      return fresh;
+    }).catch((e) => {
+      console.error("[live] background refresh failed:", e?.message ?? e);
+    });
+    return cached.value;
+  }
 
-      setCache(cacheKey, data, ttlSeconds, 20);
-      return data;
-    },
-    20
-  );
+  markCacheMiss();
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/fixtures", type, { live: "all" });
+
+    const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
+
+    /**
+     * Manteniamo un minimo reale per evitare raffiche inutili.
+     */
+    const ttlSeconds = Math.max(
+      5,
+      Math.round(liveTtlMs(liveCount) / 1000)
+    );
+
+    setCache(cacheKey, data, ttlSeconds, 20);
+    return data;
+  });
 }
 
 /**
