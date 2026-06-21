@@ -67,12 +67,12 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
   207, // Switzerland Super League
 ]);
 
-const FINAL_RESULT_TTL_SEC = 25;
-const PRECOMPUTED_CACHE_TTL_SEC = 50;
+const FINAL_RESULT_TTL_SEC = 10;
+const PRECOMPUTED_CACHE_TTL_SEC = 18;
 
 const POLL_MS_NO_TOP_LIVE = 90_000;
-const POLL_MS_FEW_TOP_LIVE = 60_000;
-const POLL_MS_MANY_TOP_LIVE = 35_000;
+const POLL_MS_FEW_TOP_LIVE = 15_000;
+const POLL_MS_MANY_TOP_LIVE = 10_000;
 
 function logDebug(...args: any[]) {
   if (DEBUG_BRAIN_LIVE) {

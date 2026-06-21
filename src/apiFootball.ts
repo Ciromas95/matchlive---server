@@ -170,8 +170,8 @@ export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promis
 
   return fetchStaleWhileRevalidate<any>(
     cacheKey,
-    20,
-    120,
+    10,
+    30,
     async () => {
       const data = await apiGet("/fixtures", type, {
         live: BRAIN_LIVE_LIVE_PARAM,
@@ -180,15 +180,15 @@ export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promis
       const liveCount = Array.isArray(data?.response) ? data.response.length : 0;
 
       /**
-       * Per BrainLive siamo più conservativi:
-       * meno traffico, meno stress, più stabilità.
+       * BrainLive deve restare reattivo: è una sezione premium/live,
+       * quindi non può mostrare punteggi troppo vecchi.
        */
       const ttlSeconds = Math.max(
-        20,
+        10,
         Math.round(liveTtlMs(liveCount) / 1000)
       );
 
-      setCache(cacheKey, data, ttlSeconds, 120);
+      setCache(cacheKey, data, ttlSeconds, 30);
       return data;
     }
   );
