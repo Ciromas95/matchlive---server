@@ -42,7 +42,7 @@ type CacheMetrics = {
   missesToday: number;
 };
 
-const DAILY_API_BUDGET = Number(process.env.API_DAILY_BUDGET ?? "75000");
+const DAILY_API_BUDGET = Number(process.env.API_DAILY_BUDGET ?? "7500");
 
 let lastResetDay = new Date().toISOString().slice(0, 10);
 
