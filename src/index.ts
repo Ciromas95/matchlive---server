@@ -337,7 +337,6 @@ app.get("/api/players/flags", async (req: Request, res: Response) => {
 app.use("/api/league/fixtures", leagueFixturesRouter);
 app.use("/api/brain", brainPrematchRouter);
 app.use("/api/brain", brainLiveRouter);
-console.log("Mounted brainLiveRouter on /api/brain");
 
 // ===============================
 // SSE stream
@@ -402,7 +401,6 @@ const PORT = Number(process.env.PORT) || 3000;
 if (process.env.ENABLE_POLLER !== "false") {
   startPoller();
 }
-console.log("brainLive exports:", Object.keys(brainLiveModule));
 if (process.env.ENABLE_BRAIN_LIVE_POLLER !== "false") {
   brainLiveModule.startBrainLivePoller(8);
 }

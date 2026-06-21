@@ -331,7 +331,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
   const totalMs = Date.now() - startedAt;
   const stats = getApiStats();
 
-  console.log(
+  logDebug(
     `[brainLive] done | ms=${totalMs} | liveTotal=${fixtures.length} | filtered=${filtered.length} | candidates=${candidates.length} | providerCallsTotal=${stats.provider.callsTotal} | providerCallsToday=${stats.provider.callsToday} | appRequestsToday=${stats.traffic.appRequestsToday} | cacheHitsTotal=${stats.cache.hitsTotal} | cacheMissesTotal=${stats.cache.missesTotal}`
   );
 
@@ -381,7 +381,7 @@ function scheduleNextRun(run: () => Promise<void>, delayMs: number) {
 
 function startBrainLivePoller(maxResults: number = 8): void {
   if (brainLivePollerStarted) {
-    console.log("[brainLive] poller already started");
+    logDebug("[brainLive] poller already started");
     return;
   }
 
@@ -389,7 +389,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
 
   const run = async () => {
     if (brainLivePollerBusy) {
-      console.log("[brainLive] poller skipped: previous run still in progress");
+      logDebug("[brainLive] poller skipped: previous run still in progress");
       scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
       return;
     }
@@ -400,7 +400,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
       const built = await refreshBrainLiveCache(maxResults);
       const nextMs = getNextPollIntervalMs(built.topLiveCount);
 
-      console.log(
+      logDebug(
         `[brainLive] next poll in ${nextMs}ms | topLiveCount=${built.topLiveCount}`
       );
 
@@ -419,12 +419,10 @@ function startBrainLivePoller(maxResults: number = 8): void {
 
   void run();
 
-  console.log(
+  logDebug(
     `[brainLive] dynamic top-live poller started | maxResults=${maxResults}`
   );
 }
-
-console.log("[brainLive.ts] dynamic top-live module loaded");
 
 export {
   buildBrainLive,

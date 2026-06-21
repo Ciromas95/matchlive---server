@@ -7,11 +7,8 @@ const buildBrainPrematch =
   typeof (brainPrematchModule as any).default === "function"
     ? (brainPrematchModule as any).default
     : typeof (brainPrematchModule as any).buildBrainPrematch === "function"
-    ? (brainPrematchModule as any).buildBrainPrematch
-    : null;
-
-console.log("brainPrematchModule =", brainPrematchModule);
-console.log("typeof resolved buildBrainPrematch =", typeof buildBrainPrematch);
+      ? (brainPrematchModule as any).buildBrainPrematch
+      : null;
 
 brainPrematchRouter.get("/prematch", async (req: Request, res: Response) => {
   try {

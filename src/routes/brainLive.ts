@@ -7,8 +7,6 @@ import {
 
 const brainLiveRouter = express.Router();
 
-console.log("brainLiveRouter file loaded");
-
 brainLiveRouter.get("/live", async (req: Request, res: Response) => {
   try {
     const maxResultsParam = Number(req.query.maxResults ?? 8);
