@@ -1,5 +1,11 @@
 import express, { Request, Response } from "express";
 import * as brainPrematchModule from "../brainPrematch";
+import * as apiFootball from "../apiFootball";
+import {
+  getPrematchStats,
+  reconcilePrematchPicks,
+  registerPrematchPicks,
+} from "../prematchTracker";
 
 const brainPrematchRouter = express.Router();
 
@@ -28,6 +34,11 @@ brainPrematchRouter.get("/prematch", async (req: Request, res: Response) => {
     }
 
     const result = await buildBrainPrematch(date, maxMatches);
+    await reconcilePrematchPicks((pendingDate) =>
+      apiFootball.getFixturesByDate(pendingDate, "brainPrematch")
+    );
+    await registerPrematchPicks(result.picks);
+    const stats = await getPrematchStats();
 
     return res.json({
       updatedAt: new Date().toISOString(),
@@ -36,6 +47,7 @@ brainPrematchRouter.get("/prematch", async (req: Request, res: Response) => {
       picks: result.picks,
       candidates: result.candidates,
       cacheState: result.cacheState ?? "fresh",
+      stats,
     });
 
   } catch (e: any) {
