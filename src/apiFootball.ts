@@ -42,6 +42,13 @@ function apiKey(): string {
   return key;
 }
 
+function hasProviderErrors(errors: any): boolean {
+  if (!errors) return false;
+  if (Array.isArray(errors)) return errors.length > 0;
+  if (typeof errors === "object") return Object.keys(errors).length > 0;
+  return Boolean(errors);
+}
+
 async function apiGet(
   path: string,
   type: CounterKey = "other",
@@ -57,6 +64,19 @@ async function apiGet(
     params,
     timeout: 10000,
   });
+
+  if (hasProviderErrors(res.data?.errors)) {
+    const message =
+      typeof res.data.errors === "string"
+        ? res.data.errors
+        : JSON.stringify(res.data.errors);
+    const err: any = new Error(`API-Football provider error: ${message}`);
+    err.response = {
+      status: 502,
+      data: res.data,
+    };
+    throw err;
+  }
 
   return res.data;
 }
@@ -185,6 +205,10 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
     setCache(cacheKey, data, ttlSeconds, 20);
     return data;
   });
+}
+
+export async function getFixtureById(fixtureId: number): Promise<any> {
+  return apiGet("/fixtures", "live", { id: fixtureId });
 }
 
 /**
@@ -316,6 +340,17 @@ export async function getPlayersByTeam(teamId: number, season: number): Promise<
   });
 }
 
+export async function getPlayerById(playerId: number, season: number): Promise<any> {
+  const cacheKey = `player_${playerId}_season_${season}`;
+
+  return fetchWithCache<any>(cacheKey, 12 * 60 * 60, async () => {
+    return apiGet("/players", "other", {
+      id: playerId,
+      season,
+    });
+  });
+}
+
 const apiFootball = {
   getLiveFixtures,
   getTopLiveFixtures,
@@ -324,6 +359,7 @@ const apiFootball = {
   getFixturesByDate,
   getTeamLastFixtures,
   getPlayersByTeam,
+  getPlayerById,
 };
 
 export default apiFootball;

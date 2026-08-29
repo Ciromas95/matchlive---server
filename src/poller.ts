@@ -1,12 +1,14 @@
-import { getLiveFixtures } from "./apiFootball";
+import { getFixtureById, getLiveFixtures } from "./apiFootball";
 import { broadcast, clientsCount } from "./stream";
 import { liveTtlMs } from "./ttl";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
+import { pushEnabled, sendFixturePush } from "./push";
 
 const lastScore = new Map<number, string>();
 
 // eventId -> lastSeenEpochMs (così possiamo pulire)
 const seenEvents = new Map<string, number>();
+const trackedLive = new Map<number, { fixture: any; missing: number }>();
 
 function makeEventId(ev: any, fixtureId: number) {
   const type = ev?.type ?? "";
@@ -35,7 +37,58 @@ function pruneLastScore(liveFixtureIds: Set<number>) {
 // Filtro: manda solo GOAL (consigliato). Se vuoi anche cartellini/VAR ecc lo allarghiamo.
 function isInterestingEvent(ev: any) {
   const t = String(ev?.type ?? "").toLowerCase();
-  return t === "goal";
+  const detail = String(ev?.detail ?? "").toLowerCase();
+  return t === "goal" || (t === "card" && (detail.includes("red") || detail.includes("second yellow")));
+}
+
+function matchName(f: any) {
+  return `${f?.teams?.home?.name ?? "Casa"} – ${f?.teams?.away?.name ?? "Trasferta"}`;
+}
+
+async function sendNewEventPush(f: any, ev: any, fixtureId: number) {
+  const type = String(ev?.type ?? "").toLowerCase();
+  const detail = String(ev?.detail ?? "").toLowerCase();
+  const player = String(ev?.player?.name ?? "").trim();
+  const team = String(ev?.team?.name ?? "").trim();
+  const score = `${f?.goals?.home ?? 0}-${f?.goals?.away ?? 0}`;
+  const fixture = matchName(f);
+  if (type === "goal") {
+    await Promise.all([
+      sendFixturePush(fixtureId, "goal", "GOAL", `${team || fixture} · ${score}`),
+      sendFixturePush(fixtureId, "scorer", player || "Marcatore", `${team || fixture} · ${score}`),
+      sendFixturePush(fixtureId, "goal_scorer", `GOAL${player ? ` · ${player}` : ""}`, `${team || fixture} · ${score}`),
+    ]);
+  } else if (type === "card" && (detail.includes("red") || detail.includes("second yellow"))) {
+    await sendFixturePush(
+      fixtureId,
+      "red",
+      `Espulsione${player ? ` · ${player}` : ""}`,
+      team || fixture,
+    );
+  }
+}
+
+async function checkFinishedFixtures(liveIds: Set<number>) {
+  for (const [fixtureId, tracked] of trackedLive.entries()) {
+    if (liveIds.has(fixtureId)) continue;
+    tracked.missing += 1;
+    if (tracked.missing < 2) continue;
+    const raw = await getFixtureById(fixtureId).catch(() => null);
+    const fixture = raw?.response?.[0];
+    const status = String(fixture?.fixture?.status?.short ?? "").toUpperCase();
+    if (["FT", "AET", "PEN"].includes(status)) {
+      const score = `${fixture?.goals?.home ?? 0}-${fixture?.goals?.away ?? 0}`;
+      await sendFixturePush(
+        fixtureId,
+        "finished",
+        "Partita terminata",
+        `${matchName(fixture)} · ${score}`,
+      );
+      trackedLive.delete(fixtureId);
+    } else if (tracked.missing >= 5) {
+      trackedLive.delete(fixtureId);
+    }
+  }
 }
 
 export function startPoller() {
@@ -49,7 +102,7 @@ export function startPoller() {
   const run = async () => {
     try {
       // Se non c’è nessun client SSE, rallenta molto (risparmi API)
-      if (clientsCount() === 0) {
+      if (clientsCount() === 0 && !pushEnabled()) {
         scheduleNext(30000);
         return;
       }
@@ -66,6 +119,17 @@ export function startPoller() {
         if (!fixtureId) continue;
 
         liveIds.add(fixtureId);
+        const alreadyTracked = trackedLive.has(fixtureId);
+        trackedLive.set(fixtureId, { fixture: f, missing: 0 });
+        const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
+        if (!alreadyTracked && elapsed <= 2) {
+          await sendFixturePush(
+            fixtureId,
+            "kickoff",
+            "Partita iniziata",
+            matchName(f),
+          );
+        }
 
         // ✅ RED CARDS: aggiorna cache dai events del fixture (non broadcast)
         // TTL 90s per sicurezza
@@ -85,6 +149,9 @@ export function startPoller() {
           if (seenEvents.has(eventId)) continue;
 
           seenEvents.set(eventId, Date.now());
+          // Al riavvio del server inizializza la timeline senza notificare
+          // come nuovi tutti gli episodi già avvenuti nel match.
+          if (!alreadyTracked && elapsed > 2) continue;
 
           broadcast({
             eventId,
@@ -95,6 +162,7 @@ export function startPoller() {
             elapsed: ev?.time?.elapsed,
             player: ev?.player?.name,
           });
+          await sendNewEventPush(f, ev, fixtureId);
         }
       }
 
@@ -102,6 +170,7 @@ export function startPoller() {
       pruneSeenEvents(6 * 60 * 60 * 1000); // 6 ore
       pruneLastScore(liveIds);
       pruneRedCardsLive(liveIds); // ✅
+      await checkFinishedFixtures(liveIds);
 
       // Poll dinamico coerente con la cache TTL live (ms)
       const nextMs = Math.max(4000, liveTtlMs(liveCount) + 300);
