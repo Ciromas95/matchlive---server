@@ -29,7 +29,7 @@ type PickRecord = {
   resolvedAt?: string;
 };
 
-type Store = { version: 2; picks: Record<string, PickRecord> };
+type Store = { version: 3; picks: Record<string, PickRecord> };
 
 const railwayVolumePath = (process.env.RAILWAY_VOLUME_MOUNT_PATH ?? "").trim();
 const configuredStorePath = (process.env.PREMATCH_STATS_FILE ?? "").trim();
@@ -51,12 +51,16 @@ async function readStore(): Promise<Store> {
   try {
     const raw = await fs.readFile(storePath, "utf8");
     const parsed = JSON.parse(raw);
-    return { version: 2, picks: parsed?.picks ?? {} };
+    // v3 avvia il nuovo storico richiesto per il Cervello. La migrazione
+    // azzera una sola volta i contatori precedenti; i dati v3 persistono poi
+    // normalmente sul volume Railway anche dopo restart e deploy.
+    if (parsed?.version !== 3) return { version: 3, picks: {} };
+    return { version: 3, picks: parsed?.picks ?? {} };
   } catch (error: any) {
     if (error?.code !== "ENOENT") {
       console.error("[prematch-stats] read failed:", error?.message ?? error);
     }
-    return { version: 2, picks: {} };
+    return { version: 3, picks: {} };
   }
 }
 

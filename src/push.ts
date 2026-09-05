@@ -128,7 +128,7 @@ export async function sendFixturePush(
     await getMessaging().send({
       topic,
       notification: { title, body },
-      data: { fixtureId: String(fixtureId), type, ...extra },
+      data: { fixtureId: String(fixtureId), type, title, body, ...extra },
       android: {
         priority: "high",
         notification: {
