@@ -213,7 +213,7 @@ function isUsefulLiveFixture(f: any): boolean {
 
   if (!LIVE_STATUSES.has(status)) return false;
   if (elapsed < 1) return false;
-  if (elapsed > 89) return false;
+  if (elapsed > 80 || (elapsed > 30 && elapsed < 46)) return false;
   if (!isAllowedLeague(f)) return false;
   if (isYouthOrReserveFixture(f)) return false;
 
@@ -418,15 +418,25 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
       const rawStats = await getLiveFixtureStatisticsCached(candidate.fixtureId).catch(() => null);
       const statistics = parseLiveStatsV4(rawStats, candidate.home.id ?? 0, candidate.away.id ?? 0);
       if (!statistics || candidate.elapsed == null) return null;
-      const observation: LiveObservationV4 = {
+      const fullObservation: LiveObservationV4 = {
         elapsed: candidate.elapsed, homeGoals: candidate.home.goals,
         awayGoals: candidate.away.goals, stats: statistics,
       };
-      if (observation.elapsed <= 45) {
-        halftimeBaselines.set(candidate.fixtureId, observation);
+      if (fullObservation.elapsed <= 45) {
+        halftimeBaselines.set(candidate.fixtureId, fullObservation);
       }
+      const observation: LiveObservationV4 = {
+        ...fullObservation,
+        phaseElapsed: fullObservation.elapsed > 45
+          ? fullObservation.elapsed - 45
+          : fullObservation.elapsed,
+        stats: statsForCurrentHalf(candidate.fixtureId, fullObservation),
+      };
       const history = liveHistory.get(candidate.fixtureId) ?? [];
-      const previous = [...history].reverse().find((item) => observation.elapsed - item.elapsed >= 1 && observation.elapsed - item.elapsed <= 12);
+      const previous = [...history].reverse().find((item) =>
+        (item.elapsed > 45) === (observation.elapsed > 45) &&
+        observation.elapsed - item.elapsed >= 1 && observation.elapsed - item.elapsed <= 12
+      );
       const last = history[history.length - 1];
       if (!last || last.elapsed !== observation.elapsed || JSON.stringify(last.stats) !== JSON.stringify(observation.stats)) {
         history.push(observation);
@@ -445,7 +455,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
         phaseElapsed: observation.elapsed > 45
           ? observation.elapsed - 45
           : observation.elapsed,
-        stats: statsForCurrentHalf(candidate.fixtureId, observation),
+        stats: observation.stats,
       };
     }));
     evaluated.push(...batch.filter(Boolean));

@@ -1182,6 +1182,13 @@ export function isPrematchPublicationOpenV3(
   return date === clock.date && clock.hour >= 10;
 }
 
+// Snapshot atomico della pubblicazione giornaliera: una volta terminato il
+// calcolo, nuove card non vengono aggiunte a scaglioni durante la giornata.
+const publishedDailyResults = new Map<
+  string,
+  { picks: PrematchPickV3[]; candidates: never[] }
+>();
+
 export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promise<{
   picks: PrematchPickV3[];
   candidates: never[];
@@ -1195,16 +1202,29 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
       cacheState: "fresh",
     };
   }
+  const published = publishedDailyResults.get(date);
+  if (published) {
+    return {
+      ...published,
+      picks: visiblePicks(published.picks).slice(0, max),
+      cacheState: "fresh",
+    };
+  }
   const key = `brainPrematchV3:result:${date}:${max}:v4-robust-1`;
   const state = getCacheState<{ picks: PrematchPickV3[]; candidates: never[] }>(key);
   if (state.state === "fresh" && state.value) {
+    publishedDailyResults.set(date, state.value);
     return { ...state.value, picks: visiblePicks(state.value.picks), cacheState: "fresh" };
   }
   if (state.state === "stale" && state.value) {
-    void runOnce(key, () => compute(date, max, key)).catch(() => undefined);
+    publishedDailyResults.set(date, state.value);
     return { ...state.value, picks: visiblePicks(state.value.picks), cacheState: "stale" };
   }
   const fresh = await runOnce(key, () => compute(date, max, key));
+  publishedDailyResults.set(date, {
+    picks: fresh.picks,
+    candidates: fresh.candidates,
+  });
   return { ...fresh, picks: visiblePicks(fresh.picks), cacheState: "miss" };
 }
 
@@ -1238,9 +1258,8 @@ async function compute(date: string, max: number, key: string) {
   // Una scelta pubblicata non deve sparire perché un refresh successivo ha
   // dati/quote momentaneamente incompleti. Resta stabile fino al calcio
   // d'inizio; `visiblePicks` la rimuove esattamente in quel momento.
-  // La selezione viene rivalutata durante la giornata: le statistiche pesanti
-  // restano nelle rispettive cache, mentre quote e validità della card possono
-  // aggiornarsi senza rimanere congelate fino al calcio d'inizio.
+  // L'intero risultato viene pubblicato come un solo snapshot giornaliero;
+  // `visiblePicks` continua comunque a rimuovere ogni gara al calcio d'inizio.
   setCache(key, result, isApiEcoMode() ? 30 * 60 : 5 * 60, 30 * 60);
   return result;
 }

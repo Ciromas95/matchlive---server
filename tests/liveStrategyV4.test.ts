@@ -40,8 +40,8 @@ test("live V4: non insegue una squadra dominante già in vantaggio", () => {
   assert.equal(result, null);
 });
 
-test("live V4: segnala la squadra sotto di un gol che domina", () => {
-  const result = evaluateLiveV4(observation(32, 1, 0, stats({
+test("live V4: segnala entro il 30' la squadra sotto di un gol che domina", () => {
+  const result = evaluateLiveV4(observation(28, 1, 0, stats({
     shotsHome: 3, shotsAway: 13,
     shotsOnGoalHome: 1, shotsOnGoalAway: 6,
     cornersAway: 6, possessionHome: 34, possessionAway: 66,
@@ -50,6 +50,28 @@ test("live V4: segnala la squadra sotto di un gol che domina", () => {
   assert.equal(result?.tagType, "awayDom");
   assert.equal(result?.signalKind, "equalizer");
   assert.equal(result?.goalTarget, "away");
+});
+
+test("live V4: non pubblica nuove analisi tra il 31' e l'intervallo", () => {
+  const result = evaluateLiveV4(observation(32, 1, 0, stats({
+    shotsHome: 3, shotsAway: 13,
+    shotsOnGoalHome: 1, shotsOnGoalAway: 6,
+    cornersAway: 6, possessionHome: 34, possessionAway: 66,
+    shotsInsideBoxAway: 8,
+  })));
+  assert.equal(result, null);
+});
+
+test("live V4: non pubblica nuove analisi dopo l'80'", () => {
+  const result = evaluateLiveV4({
+    ...observation(81, 1, 1, stats({
+      shotsHome: 9, shotsAway: 10,
+      shotsOnGoalHome: 4, shotsOnGoalAway: 5,
+      cornersHome: 4, cornersAway: 5,
+    })),
+    phaseElapsed: 36,
+  });
+  assert.equal(result, null);
 });
 
 test("live V4: scarta un incontro con due gol di distacco", () => {

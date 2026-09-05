@@ -11,6 +11,7 @@ export type LiveStatsV4 = {
 
 export type LiveObservationV4 = {
   elapsed: number;
+  phaseElapsed?: number;
   homeGoals: number;
   awayGoals: number;
   stats: LiveStatsV4;
@@ -80,7 +81,10 @@ function logistic(value: number): number {
  */
 export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObservationV4) {
   const { elapsed, homeGoals, awayGoals, stats: s } = current;
-  if (elapsed < 4 || elapsed > 89 || homeGoals + awayGoals >= 5) return null;
+  const phaseElapsed = current.phaseElapsed ?? elapsed;
+  const insideBettingWindow =
+    (elapsed >= 4 && elapsed <= 30) || (elapsed >= 46 && elapsed <= 80);
+  if (!insideBettingWindow || homeGoals + awayGoals >= 5) return null;
   if ([s.shotsHome, s.shotsAway, s.shotsOnGoalHome, s.shotsOnGoalAway].some((item) => item == null)) return null;
 
   const shotsH = s.shotsHome!, shotsA = s.shotsAway!;
@@ -101,8 +105,8 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
   const recentCornersH = hasWindow ? delta(numberOrZero(s.cornersHome), previous!.stats.cornersHome) : null;
   const recentCornersA = hasWindow ? delta(numberOrZero(s.cornersAway), previous!.stats.cornersAway) : null;
 
-  const early = elapsed < 15;
-  const veryEarly = elapsed < 8;
+  const early = phaseElapsed < 15;
+  const veryEarly = phaseElapsed < 8;
   const options: LiveSignalV4[] = [];
 
   for (const home of [true, false]) {
@@ -128,8 +132,8 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
     if (ownRed > 0) continue;
 
     const share = ownShots / Math.max(1, totalShots);
-    const shotsPerMinute = ownShots / Math.max(1, elapsed);
-    const sotPerMinute = ownSot / Math.max(1, elapsed);
+    const shotsPerMinute = ownShots / Math.max(1, phaseElapsed);
+    const sotPerMinute = ownSot / Math.max(1, phaseElapsed);
     const extremeStart = veryEarly && ownShots >= 5 && ownSot >= 2 && ownCorners >= 2 && share >= 0.72;
     const minimumShots = veryEarly ? 5 : early ? 6 : 6;
     const minimumSot = veryEarly ? 2 : early ? 2 : 3;
@@ -173,7 +177,7 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
   // Match aperto soltanto con punteggio in equilibrio: 0-0 o 1-1.
   const levelAndUseful = homeGoals === awayGoals && (homeGoals === 0 || homeGoals === 1);
   const bothThreaten = shotsH >= (early ? 2 : 3) && shotsA >= (early ? 2 : 3) && sotH >= 1 && sotA >= 1;
-  const projectedPace = totalShots * 90 / Math.max(6, elapsed);
+  const projectedPace = totalShots * 45 / Math.max(6, phaseElapsed);
   const recentTotal = numberOrZero(recentShotsH) + numberOrZero(recentShotsA);
   const openThresholdMet = early
     ? totalShots >= 9 && totalSot >= 4 && projectedPace >= 34
@@ -202,4 +206,3 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
     ? { ...options[0], stats: s, algorithmVersion: "brainlive-live-v4" }
     : null;
 }
-
