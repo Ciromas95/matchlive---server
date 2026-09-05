@@ -69,7 +69,7 @@ export async function sendBrainLivePush(
     await getMessaging().send({
       topic: "brainlive_brain_live",
       notification: {
-        title: "Il Cervello ha trovato un match LIVE",
+        title: "🧠 Il Cervello ha trovato un match LIVE",
         body: `${homeName} – ${awayName}`,
       },
       data: { fixtureId: String(fixtureId), type: "brain_live_found" },
@@ -93,7 +93,7 @@ export async function sendBrainPrematchPush(count: number) {
     await getMessaging().send({
       topic: "brainlive_brain_prematch",
       notification: {
-        title: "Il Cervello ha completato le analisi",
+        title: "🧠 Il Cervello ha completato le analisi",
         body: count === 1
           ? "È disponibile un nuovo pronostico pre-match."
           : `Sono disponibili ${count} nuovi pronostici pre-match.`,
