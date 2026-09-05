@@ -1,3 +1,4 @@
+import { runtimeModeStore } from "./runtimeMode";
 import { getCache, setCache } from "./cache";
 import {
   markCacheHit,
@@ -7,7 +8,11 @@ import {
   markBrainLiveCandidates,
   getApiStats,
 } from "./stats";
-import { getTopLiveFixtures } from "./apiFootball";
+import { getTopLiveFixtures, getLiveFixtureStatisticsCached } from "./apiFootball";
+import { evaluateLiveV4, LiveObservationV4, parseLiveStatsV4 } from "./liveStrategyV4";
+import { sendBrainLivePush } from "./push";
+import { isApiEcoMode } from "./ttl";
+import { loadBrainLiveState, saveBrainLiveState } from "./brainLiveState";
 
 type BrainLiveCandidate = {
   fixtureId: number;
@@ -38,6 +43,8 @@ type BrainLiveCandidate = {
 
 type BrainLiveResult = {
   candidates: BrainLiveCandidate[];
+  hot?: any;
+  others?: any[];
   topLiveCount?: number;
 };
 
@@ -47,6 +54,73 @@ type BrainLiveBuildOutput = {
 };
 
 const DEBUG_BRAIN_LIVE = false;
+const liveHistory = new Map<number, LiveObservationV4[]>();
+const halftimeBaselines = new Map<number, LiveObservationV4>();
+const activeSignalScore = new Map<number, { home: number; away: number }>();
+const cooldownUntilMinute = new Map<number, number>();
+let stateHydration: Promise<void> | null = null;
+
+function hydratePersistentState() {
+  return stateHydration ??= loadBrainLiveState().then((state) => {
+    if (!state) return;
+    for (const [id, value] of Object.entries(state.halftimeBaselines ?? {})) {
+      halftimeBaselines.set(Number(id), value);
+    }
+    for (const [id, value] of Object.entries(state.activeSignalScore ?? {})) {
+      activeSignalScore.set(Number(id), value);
+    }
+    for (const [id, value] of Object.entries(state.cooldownUntilMinute ?? {})) {
+      cooldownUntilMinute.set(Number(id), Number(value));
+    }
+    previousCandidateIds = new Set(state.previousCandidateIds ?? []);
+  });
+}
+
+function persistState() {
+  return saveBrainLiveState({
+    halftimeBaselines: Object.fromEntries(halftimeBaselines),
+    activeSignalScore: Object.fromEntries(activeSignalScore),
+    cooldownUntilMinute: Object.fromEntries(cooldownUntilMinute),
+    previousCandidateIds: [...(previousCandidateIds ?? new Set<number>())],
+  });
+}
+
+function statsForCurrentHalf(fixtureId: number, observation: LiveObservationV4): LiveObservationV4['stats'] {
+  if (observation.elapsed <= 45) {
+    halftimeBaselines.set(fixtureId, observation);
+    return observation.stats;
+  }
+  const baseline = halftimeBaselines.get(fixtureId);
+  if (!baseline) return observation.stats;
+  const delta = (now: number | null, before: number | null) =>
+    now == null ? null : Math.max(0, now - (before ?? 0));
+  const secondMinutes = Math.max(1, observation.elapsed - 45);
+  const periodPossession = (now: number | null, first: number | null) => {
+    if (now == null || first == null) return now;
+    return Math.max(0, Math.min(100,
+      (now * observation.elapsed - first * 45) / secondMinutes));
+  };
+  const current = observation.stats;
+  const first = baseline.stats;
+  return {
+    shotsHome: delta(current.shotsHome, first.shotsHome),
+    shotsAway: delta(current.shotsAway, first.shotsAway),
+    shotsOnGoalHome: delta(current.shotsOnGoalHome, first.shotsOnGoalHome),
+    shotsOnGoalAway: delta(current.shotsOnGoalAway, first.shotsOnGoalAway),
+    cornersHome: delta(current.cornersHome, first.cornersHome),
+    cornersAway: delta(current.cornersAway, first.cornersAway),
+    possessionHome: periodPossession(current.possessionHome, first.possessionHome),
+    possessionAway: periodPossession(current.possessionAway, first.possessionAway),
+    xgHome: delta(current.xgHome, first.xgHome),
+    xgAway: delta(current.xgAway, first.xgAway),
+    redsHome: delta(current.redsHome, first.redsHome),
+    redsAway: delta(current.redsAway, first.redsAway),
+    shotsInsideBoxHome: delta(current.shotsInsideBoxHome, first.shotsInsideBoxHome),
+    shotsInsideBoxAway: delta(current.shotsInsideBoxAway, first.shotsInsideBoxAway),
+    goalkeeperSavesHome: delta(current.goalkeeperSavesHome, first.goalkeeperSavesHome),
+    goalkeeperSavesAway: delta(current.goalkeeperSavesAway, first.goalkeeperSavesAway),
+  };
+}
 
 const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE", "INT"]);
 
@@ -67,8 +141,8 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
   207, // Switzerland Super League
 ]);
 
-const FINAL_RESULT_TTL_SEC = 10;
-const PRECOMPUTED_CACHE_TTL_SEC = 18;
+const finalResultTtlSec = () => isApiEcoMode() ? 120 : 10;
+const precomputedCacheTtlSec = () => isApiEcoMode() ? 300 : 18;
 
 const POLL_MS_NO_TOP_LIVE = 90_000;
 const POLL_MS_FEW_TOP_LIVE = 15_000;
@@ -81,6 +155,7 @@ function logDebug(...args: any[]) {
 }
 
 function getNextPollIntervalMs(topLiveCount: number): number {
+  if (isApiEcoMode()) return topLiveCount <= 0 ? 10 * 60_000 : 3 * 60_000;
   if (topLiveCount <= 0) return POLL_MS_NO_TOP_LIVE;
   if (topLiveCount <= 3) return POLL_MS_FEW_TOP_LIVE;
   return POLL_MS_MANY_TOP_LIVE;
@@ -137,8 +212,8 @@ function isUsefulLiveFixture(f: any): boolean {
   const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
 
   if (!LIVE_STATUSES.has(status)) return false;
-  if (elapsed < 18) return false;
-  if (elapsed > 75) return false;
+  if (elapsed < 1) return false;
+  if (elapsed > 89) return false;
   if (!isAllowedLeague(f)) return false;
   if (isYouthOrReserveFixture(f)) return false;
 
@@ -181,9 +256,10 @@ function getLightCandidateScore(f: any): number {
 
   let score = 0;
 
+  if (elapsed >= 1 && elapsed < 18) score += 22;
   if (elapsed >= 18 && elapsed <= 40) score += 16;
   if (elapsed >= 46 && elapsed <= 70) score += 20;
-  if (elapsed > 70 && elapsed <= 75) score += 4;
+  if (elapsed > 70 && elapsed <= 89) score += 4;
 
   if (
     (homeGoals === 0 && awayGoals === 0) ||
@@ -281,6 +357,7 @@ async function loadSharedLiveFixtures(): Promise<any[]> {
 }
 
 async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOutput> {
+  await hydratePersistentState();
   const cacheKey = getLightResultCacheKey(maxResults);
   const cached = getCache<BrainLiveResult>(cacheKey);
 
@@ -302,7 +379,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
 
   const filtered = fixtures.filter(isUsefulLiveFixture);
 
-  const candidates = dedupeByFixture(filtered)
+  const preliminary = dedupeByFixture(filtered)
     .map((f) => ({
       fixture: f,
       lightScore: getLightCandidateScore(f),
@@ -319,14 +396,76 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
     .map((x) => toCandidate(x.fixture))
     .filter((x): x is BrainLiveCandidate => x != null);
 
+  for (const fixture of fixtures) {
+    const id = Number(fixture?.fixture?.id ?? 0);
+    const home = Number(fixture?.goals?.home ?? 0);
+    const away = Number(fixture?.goals?.away ?? 0);
+    const elapsed = Number(fixture?.fixture?.status?.elapsed ?? 0);
+    const baseline = activeSignalScore.get(id);
+    if (baseline && (home !== baseline.home || away !== baseline.away)) {
+      // Il risultato è cambiato: l'obiettivo della card precedente è concluso.
+      // Ripartiamo da statistiche successive al gol dopo tre minuti di verifica.
+      activeSignalScore.delete(id);
+      cooldownUntilMinute.set(id, elapsed + 3);
+      liveHistory.delete(id);
+    }
+  }
+  const evaluated: any[] = [];
+  for (let index = 0; index < preliminary.length; index += 3) {
+    const batch = await Promise.all(preliminary.slice(index, index + 3).map(async (candidate) => {
+      const cooldown = cooldownUntilMinute.get(candidate.fixtureId) ?? 0;
+      if ((candidate.elapsed ?? 0) < cooldown) return null;
+      const rawStats = await getLiveFixtureStatisticsCached(candidate.fixtureId).catch(() => null);
+      const statistics = parseLiveStatsV4(rawStats, candidate.home.id ?? 0, candidate.away.id ?? 0);
+      if (!statistics || candidate.elapsed == null) return null;
+      const observation: LiveObservationV4 = {
+        elapsed: candidate.elapsed, homeGoals: candidate.home.goals,
+        awayGoals: candidate.away.goals, stats: statistics,
+      };
+      if (observation.elapsed <= 45) {
+        halftimeBaselines.set(candidate.fixtureId, observation);
+      }
+      const history = liveHistory.get(candidate.fixtureId) ?? [];
+      const previous = [...history].reverse().find((item) => observation.elapsed - item.elapsed >= 1 && observation.elapsed - item.elapsed <= 12);
+      const last = history[history.length - 1];
+      if (!last || last.elapsed !== observation.elapsed || JSON.stringify(last.stats) !== JSON.stringify(observation.stats)) {
+        history.push(observation);
+      }
+      liveHistory.set(candidate.fixtureId, history.filter((item) => observation.elapsed - item.elapsed <= 12));
+      const signal = evaluateLiveV4(observation, previous);
+      if (!signal) return null;
+      activeSignalScore.set(candidate.fixtureId, {
+        home: candidate.home.goals,
+        away: candidate.away.goals,
+      });
+      return {
+        ...candidate,
+        ...signal,
+        phase: observation.elapsed > 45 ? "2H" : "1H",
+        phaseElapsed: observation.elapsed > 45
+          ? observation.elapsed - 45
+          : observation.elapsed,
+        stats: statsForCurrentHalf(candidate.fixtureId, observation),
+      };
+    }));
+    evaluated.push(...batch.filter(Boolean));
+  }
+  evaluated.sort((a, b) => b.finalScore - a.finalScore);
+  const hot = evaluated.find((pick) => pick.tagType === "hot") ?? null;
+  const others = evaluated.filter((pick) => pick.fixtureId !== hot?.fixtureId);
+  const candidates: BrainLiveCandidate[] = evaluated;
+
   markBrainLiveCandidates(candidates.length);
 
   const result: BrainLiveResult = {
     candidates,
+    hot,
+    others,
     topLiveCount: filtered.length,
   };
 
-  setCache(cacheKey, result, FINAL_RESULT_TTL_SEC);
+  setCache(cacheKey, result, finalResultTtlSec());
+  void persistState();
 
   const totalMs = Date.now() - startedAt;
   const stats = getApiStats();
@@ -354,7 +493,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
 
 async function refreshBrainLiveCache(maxResults: number = 8): Promise<BrainLiveBuildOutput> {
   const built = await buildBrainLive(maxResults);
-  setCache(getPrecomputedCacheKey(maxResults), built.result, PRECOMPUTED_CACHE_TTL_SEC);
+  setCache(getPrecomputedCacheKey(maxResults), built.result, precomputedCacheTtlSec());
   return built;
 }
 
@@ -368,6 +507,28 @@ function getDefaultBrainLivePayload(_maxResults: number = 8): BrainLiveResult {
 let brainLivePollerStarted = false;
 let brainLivePollerBusy = false;
 let brainLiveTimer: NodeJS.Timeout | null = null;
+let previousCandidateIds: Set<number> | null = null;
+
+async function notifyNewCandidates(candidates: BrainLiveCandidate[]) {
+  await hydratePersistentState();
+  const currentIds = new Set(candidates.map((candidate) => candidate.fixtureId));
+  // Al primo ciclo dopo un deploy inizializziamo lo stato senza inviare
+  // notifiche duplicate per match già rilevati.
+  if (previousCandidateIds == null) {
+    previousCandidateIds = currentIds;
+    return;
+  }
+  for (const candidate of candidates) {
+    if (previousCandidateIds.has(candidate.fixtureId)) continue;
+    await sendBrainLivePush(
+      candidate.fixtureId,
+      candidate.home.name ?? "Casa",
+      candidate.away.name ?? "Trasferta",
+    );
+  }
+  previousCandidateIds = currentIds;
+  await persistState();
+}
 
 function scheduleNextRun(run: () => Promise<void>, delayMs: number) {
   if (brainLiveTimer) {
@@ -390,7 +551,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
   const run = async () => {
     if (brainLivePollerBusy) {
       logDebug("[brainLive] poller skipped: previous run still in progress");
-      scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
+      scheduleNextRun(run, isApiEcoMode() ? 3 * 60_000 : POLL_MS_FEW_TOP_LIVE);
       return;
     }
 
@@ -398,6 +559,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
 
     try {
       const built = await refreshBrainLiveCache(maxResults);
+      await notifyNewCandidates(built.result.candidates);
       const nextMs = getNextPollIntervalMs(built.topLiveCount);
 
       logDebug(
@@ -411,12 +573,13 @@ function startBrainLivePoller(maxResults: number = 8): void {
         e?.response?.data ?? e?.message ?? e
       );
 
-      scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
+      scheduleNextRun(run, isApiEcoMode() ? 3 * 60_000 : POLL_MS_FEW_TOP_LIVE);
     } finally {
       brainLivePollerBusy = false;
     }
   };
 
+  runtimeModeStore().subscribe(mode => scheduleNextRun(run, mode === "eco" ? 3 * 60_000 : 1000));
   void run();
 
   logDebug(

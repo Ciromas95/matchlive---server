@@ -1,9 +1,14 @@
+import { isApiEcoMode } from "./runtimeMode";
+import fs from "node:fs";
+import path from "node:path";
+
 export type CounterKey =
   | "live"
   | "compact"
   | "events"
   | "stats"
   | "lineups"
+  | "standings"
   | "brainPrematch"
   | "brainLive"
   | "other";
@@ -35,6 +40,16 @@ type ProviderMetrics = {
   byTypeToday: Record<CounterKey, number>;
 };
 
+type ProviderQuotaMetrics = {
+  day: string | null;
+  dailyLimit: number | null;
+  dailyRemaining: number | null;
+  minuteLimit: number | null;
+  minuteRemaining: number | null;
+  syncedAt: string | null;
+  observedAt?: string | null;
+};
+
 type CacheMetrics = {
   hitsTotal: number;
   hitsToday: number;
@@ -43,6 +58,7 @@ type CacheMetrics = {
 };
 
 const DAILY_API_BUDGET = Number(process.env.API_DAILY_BUDGET ?? "7500");
+const METRICS_STORE_PATH = process.env.METRICS_STORE_PATH ?? "/data/brainlive-api-metrics.json";
 
 let lastResetDay = new Date().toISOString().slice(0, 10);
 
@@ -56,10 +72,20 @@ const provider: ProviderMetrics = {
     events: 0,
     stats: 0,
     lineups: 0,
+    standings: 0,
     brainPrematch: 0,
     brainLive: 0,
     other: 0,
   },
+};
+
+const providerQuota: ProviderQuotaMetrics = {
+  day: null,
+  dailyLimit: null,
+  dailyRemaining: null,
+  minuteLimit: null,
+  minuteRemaining: null,
+  syncedAt: null,
 };
 
 const traffic: TrafficMetrics = {
@@ -89,10 +115,59 @@ const brainLive: BrainLiveMetrics = {
   statsCacheHitsToday: 0,
 };
 
-setInterval(() => {
+type PersistedMetrics = {
+  lastResetDay?: string;
+  provider?: Partial<ProviderMetrics>;
+  providerQuota?: Partial<ProviderQuotaMetrics>;
+  traffic?: Partial<TrafficMetrics>;
+  cache?: Partial<CacheMetrics>;
+  brainLive?: Partial<BrainLiveMetrics>;
+};
+
+/**
+ * Il volume /data di Railway sopravvive ai deploy: salva qui quota e dettaglio
+ * della dashboard, così un riavvio non fa sembrare azzerato il consumo reale.
+ */
+function restoreMetrics() {
+  try {
+    if (!fs.existsSync(METRICS_STORE_PATH)) return;
+    const saved = JSON.parse(fs.readFileSync(METRICS_STORE_PATH, "utf8")) as PersistedMetrics;
+    if (typeof saved.lastResetDay === "string") lastResetDay = saved.lastResetDay;
+    Object.assign(provider, saved.provider ?? {});
+    Object.assign(provider.byTypeToday, saved.provider?.byTypeToday ?? {});
+    Object.assign(providerQuota, saved.providerQuota ?? {});
+    Object.assign(traffic, saved.traffic ?? {});
+    Object.assign(traffic.endpointByPathToday, saved.traffic?.endpointByPathToday ?? {});
+    Object.assign(cache, saved.cache ?? {});
+    Object.assign(brainLive, saved.brainLive ?? {});
+  } catch (error: any) {
+    console.warn("[stats] impossibile ripristinare le metriche:", error?.message ?? error);
+  }
+}
+
+function persistMetrics() {
+  try {
+    fs.mkdirSync(path.dirname(METRICS_STORE_PATH), { recursive: true });
+    const tempPath = `${METRICS_STORE_PATH}.tmp`;
+    fs.writeFileSync(
+      tempPath,
+      JSON.stringify({ lastResetDay, provider, providerQuota, traffic, cache, brainLive }),
+      "utf8",
+    );
+    fs.renameSync(tempPath, METRICS_STORE_PATH);
+  } catch (error: any) {
+    // In sviluppo locale il volume potrebbe non esistere o non essere scrivibile.
+    console.warn("[stats] impossibile salvare le metriche:", error?.message ?? error);
+  }
+}
+
+restoreMetrics();
+
+const minuteResetTimer = setInterval(() => {
   provider.callsLastMinute = 0;
   traffic.appRequestsLastMinute = 0;
 }, 60_000);
+minuteResetTimer.unref?.();
 
 function resetIfNeeded() {
   const today = new Date().toISOString().slice(0, 10);
@@ -120,6 +195,7 @@ function resetIfNeeded() {
     brainLive.candidatesToday = 0;
     brainLive.statsFetchedToday = 0;
     brainLive.statsCacheHitsToday = 0;
+    persistMetrics();
   }
 }
 
@@ -129,18 +205,86 @@ export function markApiCall(type: CounterKey) {
   provider.callsToday += 1;
   provider.callsLastMinute += 1;
   provider.byTypeToday[type] += 1;
+  persistMetrics();
+}
+
+/** Conteggio ufficiale restituito da API-Football in ogni risposta. */
+export function syncProviderQuota(headers: any, requestedAt = Date.now()) {
+  const read = (name: string): unknown => {
+    if (!headers) return null;
+    if (typeof headers.get === "function") {
+      const value = headers.get(name);
+      if (value != null) return value;
+    }
+    const wanted = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === wanted) return value;
+    }
+    return null;
+  };
+  const number = (value: unknown, signed = false): number | null => {
+    // Number(null), Number("") and Number(false) are zero, not quota readings.
+    if (typeof value !== "number" && typeof value !== "string") return null;
+    if (typeof value === "string" && value.trim() === "") return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && (signed || parsed >= 0) ? parsed : null;
+  };
+
+  const dailyLimit = number(read("x-ratelimit-requests-limit"));
+  const dailyRemaining = number(read("x-ratelimit-requests-remaining"), true);
+  const minuteLimit = number(read("x-ratelimit-limit"));
+  const minuteRemaining = number(read("x-ratelimit-remaining"));
+  // A delayed response from before midnight cannot overwrite the new period.
+  // Prefer the provider's HTTP Date, falling back to the request start time.
+  const rawDate = read("date");
+  const date = typeof rawDate === "string" ? Date.parse(rawDate) : NaN;
+  const observedAt = Number.isFinite(date) && date <= Date.now() + 60_000
+    ? date : requestedAt;
+  const day = new Date(observedAt).toISOString().slice(0, 10);
+  const previousAt = Date.parse(providerQuota.observedAt ?? providerQuota.syncedAt ?? "");
+  if (providerQuota.day && day < providerQuota.day) return;
+  if (Number.isFinite(previousAt) && observedAt < previousAt) return;
+
+  // Never combine partial daily headers with a previous response or use minute
+  // limits as daily limits. Error/429/timeout responses must preserve the count.
+  if (dailyLimit != null && dailyLimit > 0 &&
+      dailyRemaining != null && dailyRemaining <= dailyLimit) {
+    const previousUsed = providerQuota.dailyLimit != null && providerQuota.dailyLimit > 0 &&
+        providerQuota.dailyRemaining != null
+      ? providerQuota.dailyLimit - providerQuota.dailyRemaining : null;
+    const incomingUsed = dailyLimit - dailyRemaining;
+    const samePeriod = providerQuota.day === day;
+    const used = samePeriod && previousUsed != null
+      ? Math.max(previousUsed, incomingUsed) : incomingUsed;
+    providerQuota.dailyLimit = dailyLimit;
+    providerQuota.dailyRemaining = dailyLimit - used;
+    providerQuota.day = day;
+    providerQuota.syncedAt = new Date().toISOString();
+    providerQuota.observedAt = new Date(observedAt).toISOString();
+    if (minuteLimit != null && minuteLimit > 0 &&
+        minuteRemaining != null && minuteRemaining <= minuteLimit) {
+      providerQuota.minuteLimit = minuteLimit;
+      providerQuota.minuteRemaining = minuteRemaining;
+    } else {
+      providerQuota.minuteLimit = null;
+      providerQuota.minuteRemaining = null;
+    }
+    persistMetrics();
+  }
 }
 
 export function markCacheHit() {
   resetIfNeeded();
   cache.hitsTotal += 1;
   cache.hitsToday += 1;
+  persistMetrics();
 }
 
 export function markCacheMiss() {
   resetIfNeeded();
   cache.missesTotal += 1;
   cache.missesToday += 1;
+  persistMetrics();
 }
 
 export function markAppRequest(method: string, path: string) {
@@ -151,12 +295,14 @@ export function markAppRequest(method: string, path: string) {
 
   const key = `${method} ${path}`;
   traffic.endpointByPathToday[key] = (traffic.endpointByPathToday[key] ?? 0) + 1;
+  persistMetrics();
 }
 
 export function markBrainLiveRun() {
   resetIfNeeded();
   brainLive.runsTotal += 1;
   brainLive.runsToday += 1;
+  persistMetrics();
 }
 
 export function markBrainLiveFixturesScanned(count: number) {
@@ -164,6 +310,7 @@ export function markBrainLiveFixturesScanned(count: number) {
   const safe = Math.max(0, Number(count) || 0);
   brainLive.fixturesScannedTotal += safe;
   brainLive.fixturesScannedToday += safe;
+  persistMetrics();
 }
 
 export function markBrainLiveCandidates(count: number) {
@@ -171,6 +318,7 @@ export function markBrainLiveCandidates(count: number) {
   const safe = Math.max(0, Number(count) || 0);
   brainLive.candidatesTotal += safe;
   brainLive.candidatesToday += safe;
+  persistMetrics();
 }
 
 export function markBrainLiveStatsFetched(count: number = 1) {
@@ -178,6 +326,7 @@ export function markBrainLiveStatsFetched(count: number = 1) {
   const safe = Math.max(0, Number(count) || 0);
   brainLive.statsFetchedTotal += safe;
   brainLive.statsFetchedToday += safe;
+  persistMetrics();
 }
 
 export function markBrainLiveStatsCacheHit(count: number = 1) {
@@ -185,24 +334,62 @@ export function markBrainLiveStatsCacheHit(count: number = 1) {
   const safe = Math.max(0, Number(count) || 0);
   brainLive.statsCacheHitsTotal += safe;
   brainLive.statsCacheHitsToday += safe;
+  persistMetrics();
 }
 
 export function getApiStats() {
   resetIfNeeded();
-  const externalToday = provider.callsToday;
+  const today = new Date().toISOString().slice(0, 10);
+  const quotaIsCurrent = providerQuota.day === today;
+  // Calendar rollover only resets local activity, never the last official quota.
+  // Keep an exhausted quota until a complete provider response confirms renewal.
+  const officialLimit = providerQuota.dailyLimit != null && providerQuota.dailyLimit > 0
+    ? providerQuota.dailyLimit : null;
+  const officialRemaining = officialLimit != null ? providerQuota.dailyRemaining : null;
+  const dailyBudget = officialLimit ?? DAILY_API_BUDGET;
+  const officialUsed =
+    officialLimit != null && officialRemaining != null
+      ? Math.max(0, officialLimit - officialRemaining)
+      : null;
+  const externalToday = officialUsed ?? provider.callsToday;
+  const officialMinuteUsed =
+    quotaIsCurrent &&
+    providerQuota.minuteLimit != null &&
+    providerQuota.minuteRemaining != null
+      ? Math.max(0, providerQuota.minuteLimit - providerQuota.minuteRemaining)
+      : null;
+  const externalLastMinute = officialMinuteUsed ?? provider.callsLastMinute;
   const memoryServedToday = cache.hitsToday;
   const memoryTotalToday = cache.hitsToday + cache.missesToday;
   const memorySaveRate = memoryTotalToday > 0 ? cache.hitsToday / memoryTotalToday : 0;
-  const usedPct = DAILY_API_BUDGET > 0 ? externalToday / DAILY_API_BUDGET : 0;
-  const topExternal = readableProviderUsage(provider.byTypeToday);
+  const usedPct = dailyBudget > 0 ? externalToday / dailyBudget : 0;
+  const classifiedToday = Object.values(provider.byTypeToday).reduce(
+    (sum, value) => sum + (Number(value) || 0),
+    0,
+  );
+  const beforeCurrentServer = Math.max(0, externalToday - classifiedToday);
+  const topExternal = readableProviderUsage(
+    provider.byTypeToday,
+    beforeCurrentServer,
+  );
   const topAppSections = readableEndpointUsage(traffic.endpointByPathToday);
 
   return {
     provider: {
       callsTotal: provider.callsTotal,
-      callsToday: provider.callsToday,
-      callsLastMinute: provider.callsLastMinute,
+      callsToday: externalToday,
+      callsLastMinute: externalLastMinute,
+      countedByServerToday: provider.callsToday,
       byTypeToday: { ...provider.byTypeToday },
+      quota: {
+        dailyLimit: officialLimit,
+        dailyRemaining: officialRemaining,
+        minuteLimit: quotaIsCurrent ? providerQuota.minuteLimit : null,
+        minuteRemaining: quotaIsCurrent ? providerQuota.minuteRemaining : null,
+        syncedAt: providerQuota.syncedAt,
+        awaitingRenewal: officialUsed != null && !quotaIsCurrent,
+        isOfficial: officialUsed != null,
+      },
     },
     traffic: {
       appRequestsTotal: traffic.appRequestsTotal,
@@ -229,8 +416,8 @@ export function getApiStats() {
       statsCacheHitsToday: brainLive.statsCacheHitsToday,
     },
     legacy: {
-      today: provider.callsToday,
-      lastMinute: provider.callsLastMinute,
+      today: externalToday,
+      lastMinute: externalLastMinute,
       byTypeToday: { ...provider.byTypeToday },
       endpointHitsToday: traffic.appRequestsToday,
       endpointHitsLastMinute: traffic.appRequestsLastMinute,
@@ -239,17 +426,30 @@ export function getApiStats() {
       cacheMisses: cache.missesTotal,
     },
     readable: {
-      dailyBudget: DAILY_API_BUDGET,
+      dailyBudget,
       externalCallsToday: externalToday,
-      externalCallsLastMinute: provider.callsLastMinute,
+      externalCallsLastMinute: externalLastMinute,
       externalBudgetUsedPct: usedPct,
       externalCallsRemainingEstimate:
-        DAILY_API_BUDGET > 0 ? Math.max(0, DAILY_API_BUDGET - externalToday) : null,
+        dailyBudget > 0 ? Math.max(0, dailyBudget - externalToday) : null,
+      providerCountIsOfficial: officialUsed != null,
+      providerSyncedAt: providerQuota.syncedAt,
+      providerAwaitingRenewal: officialUsed != null && !quotaIsCurrent,
+      providerCountNote:
+        officialUsed != null
+          ? (!quotaIsCurrent
+              ? "Ultimo conteggio confermato. In attesa del rinnovo API-Football"
+              : "Conteggio letto direttamente da API-Football")
+          : "In attesa della prima risposta API-Football dopo l'avvio del server",
+      ecoMode:
+        isApiEcoMode(),
       memoryServedToday,
       memorySaveRate,
       appRequestsToday: traffic.appRequestsToday,
       appRequestsLastMinute: traffic.appRequestsLastMinute,
       mostExpensiveSections: topExternal,
+      classifiedCallsToday: classifiedToday,
+      callsBeforeCurrentServer: beforeCurrentServer,
       mostUsedAppSections: topAppSections,
       status: getReadableStatus(usedPct),
     },
@@ -257,6 +457,12 @@ export function getApiStats() {
 }
 
 function getReadableStatus(usedPct: number) {
+  if (usedPct >= 1) {
+    return {
+      label: "Quota esaurita",
+      description: "Il consumo resta visibile fino al rinnovo confermato da API-Football.",
+    };
+  }
   if (usedPct >= 0.9) {
     return {
       label: "Risparmio forte",
@@ -277,27 +483,38 @@ function getReadableStatus(usedPct: number) {
   };
 }
 
-function readableProviderUsage(byType: Record<CounterKey, number>) {
+function readableProviderUsage(
+  byType: Record<CounterKey, number>,
+  beforeCurrentServer: number = 0,
+) {
   const labels: Record<CounterKey, string> = {
     live: "Live classico",
     compact: "Liste partite",
     events: "Eventi partita",
     stats: "Statistiche",
     lineups: "Formazioni",
+    standings: "Classifiche",
     brainPrematch: "Cervello Prematch",
     brainLive: "Cervello Live",
     other: "Altro",
   };
 
-  return Object.entries(byType)
+  const rows = Object.entries(byType)
     .map(([key, value]) => ({
       key,
       label: labels[key as CounterKey] ?? key,
       calls: Number(value) || 0,
     }))
     .filter((x) => x.calls > 0)
-    .sort((a, b) => b.calls - a.calls)
-    .slice(0, 8);
+    .sort((a, b) => b.calls - a.calls);
+  if (beforeCurrentServer > 0) {
+    rows.push({
+      key: "beforeCurrentServer",
+      label: "Prima dell'ultimo avvio o da altri server",
+      calls: beforeCurrentServer,
+    });
+  }
+  return rows.sort((a, b) => b.calls - a.calls).slice(0, 9);
 }
 
 function readableEndpointUsage(byPath: Record<string, number>) {

@@ -1,7 +1,14 @@
+import { isApiEcoMode } from "./runtimeMode";
 import axios from "axios";
 import { getCache, getCacheState, setCache } from "./cache";
 import { getInflight, runOnce } from "./inflight";
-import { CounterKey, markApiCall, markCacheHit, markCacheMiss } from "./stats";
+import {
+  CounterKey,
+  markApiCall,
+  markCacheHit,
+  markCacheMiss,
+  syncProviderQuota,
+} from "./stats";
 import { liveTtlMs } from "./ttl";
 
 const BASE_URL = "https://v3.football.api-sports.io";
@@ -55,15 +62,23 @@ async function apiGet(
   params?: Record<string, any>
 ): Promise<any> {
   markApiCall(type);
+  const quotaRequestedAt = Date.now();
 
-  const res = await axios.get(`${BASE_URL}${path}`, {
-    headers: {
-      "x-apisports-key": apiKey(),
-      Accept: "application/json",
-    },
-    params,
-    timeout: 10000,
-  });
+  let res;
+  try {
+    res = await axios.get(`${BASE_URL}${path}`, {
+      headers: {
+        "x-apisports-key": apiKey(),
+        Accept: "application/json",
+      },
+      params,
+      timeout: 10000,
+    });
+    syncProviderQuota(res.headers, quotaRequestedAt);
+  } catch (error: any) {
+    syncProviderQuota(error?.response?.headers, quotaRequestedAt);
+    throw error;
+  }
 
   if (hasProviderErrors(res.data?.errors)) {
     const message =
@@ -155,7 +170,10 @@ async function fetchStaleWhileRevalidate<T>(
  * Live globale condiviso.
  * Usalo per la sezione Live classica o quando ti serve davvero tutto il live.
  */
-export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
+export async function getLiveFixtures(
+  type: CounterKey = "live",
+  waitForFreshWhenStale = false,
+): Promise<any> {
   const cacheKey = "liveFixtures_all";
   const cached = getCacheState<any>(cacheKey);
 
@@ -176,13 +194,15 @@ export async function getLiveFixtures(type: CounterKey = "live"): Promise<any> {
 
   if (cached.state === "stale" && cached.value != null) {
     markCacheHit();
-    void runOnce(cacheKey, async () => {
+    const refresh = runOnce(cacheKey, async () => {
       const fresh = await apiGet("/fixtures", type, { live: "all" });
       const liveCount = Array.isArray(fresh?.response) ? fresh.response.length : 0;
       const ttlSeconds = Math.max(5, Math.round(liveTtlMs(liveCount) / 1000));
       setCache(cacheKey, fresh, ttlSeconds, 20);
       return fresh;
-    }).catch((e) => {
+    });
+    if (waitForFreshWhenStale) return refresh;
+    void refresh.catch((e) => {
       console.error("[live] background refresh failed:", e?.message ?? e);
     });
     return cached.value;
@@ -211,6 +231,28 @@ export async function getFixtureById(fixtureId: number): Promise<any> {
   return apiGet("/fixtures", "live", { id: fixtureId });
 }
 
+export async function getFixtureStatisticsCached(
+  fixtureId: number,
+  type: CounterKey = "other",
+): Promise<any> {
+  return fetchWithCache(
+    `fixtureStatistics:${fixtureId}`,
+    24 * 3600,
+    () => apiGet("/fixtures/statistics", type, { fixture: fixtureId }),
+    7 * 24 * 3600,
+  );
+}
+
+export async function getLiveFixtureStatisticsCached(fixtureId: number): Promise<any> {
+  const eco = isApiEcoMode();
+  return fetchStaleWhileRevalidate(
+    `liveFixtureStatistics:${fixtureId}`,
+    eco ? 180 : 10,
+    eco ? 240 : 30,
+    () => apiGet("/fixtures/statistics", "brainLive", { fixture: fixtureId }),
+  );
+}
+
 /**
  * Live ristretto ai top campionati per BrainLive.
  * Questo evita di scaricare tutto il live mondiale.
@@ -220,7 +262,7 @@ export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promis
 
   return fetchStaleWhileRevalidate<any>(
     cacheKey,
-    10,
+    isApiEcoMode() ? 180 : 10,
     30,
     async () => {
       const data = await apiGet("/fixtures", type, {
@@ -252,7 +294,10 @@ export async function getLeagueFixturesByDate(
 ): Promise<any> {
   const cacheKey = `leagueFixtures_${leagueId}_${date}_${season ?? "na"}`;
 
-  return fetchWithCache<any>(cacheKey, 120, async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const liveDayTtl = isApiEcoMode() ? 60 : 15;
+  const ttl = date === today ? liveDayTtl : 120;
+  return fetchWithCache<any>(cacheKey, ttl, async () => {
     const params: Record<string, any> = {
       league: leagueId,
       date,
@@ -263,6 +308,23 @@ export async function getLeagueFixturesByDate(
     }
 
     return apiGet("/fixtures", type, params);
+  });
+}
+
+/**
+ * API-Football pubblica le classifiche con cadenza oraria. La cache vive sul
+ * server, quindi centomila utenti condividono la stessa singola chiamata.
+ */
+export async function getStandingsCached(
+  leagueId: number,
+  season: number,
+): Promise<any> {
+  const cacheKey = `standings_${leagueId}_${season}`;
+  return fetchWithCache<any>(cacheKey, 60 * 60, async () => {
+    return apiGet("/standings", "standings", {
+      league: leagueId,
+      season,
+    });
   });
 }
 
@@ -277,13 +339,27 @@ export async function getFixtureEventsCached(
   });
 }
 
+/// Referto completo di una gara terminata. I dati definitivi non cambiano e
+/// possono essere condivisi tra tutti i profili squadra per un giorno intero.
+export async function getFinishedFixtureDetailsCached(
+  fixtureId: number,
+): Promise<any> {
+  return fetchWithCache<any>(`finishedFixture_${fixtureId}`, 24 * 60 * 60, () => {
+    return apiGet("/fixtures", "other", { id: fixtureId });
+  });
+}
+
 export async function getFixturesByDate(
   date: string,
   type: CounterKey = "brainPrematch"
 ): Promise<any> {
   const cacheKey = `fixturesByDate_${date}`;
 
-  return fetchStaleWhileRevalidate<any>(cacheKey, 600, 30 * 60, async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const isToday = date === today;
+  const ttl = isToday ? (isApiEcoMode() ? 60 : 15) : 600;
+  const stale = isToday ? (isApiEcoMode() ? 90 : 20) : 30 * 60;
+  return fetchStaleWhileRevalidate<any>(cacheKey, ttl, stale, async () => {
     return apiGet("/fixtures", type, { date });
   });
 }

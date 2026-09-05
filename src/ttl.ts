@@ -1,7 +1,9 @@
-// src/ttl.ts
+import { isApiEcoMode } from "./runtimeMode";
+export { isApiEcoMode } from "./runtimeMode";
+
 export function liveTtlMs(liveCount: number) {
-  if (liveCount <= 0) return 45_000;   // niente live → cache lunga
-  if (liveCount <= 5) return 8_000;
-  if (liveCount <= 15) return 6_000;
-  return 5_000;                        // tante live → live classico quasi istantaneo
+  if (isApiEcoMode()) {
+    return liveCount <= 0 ? 5 * 60_000 : 60_000;
+  }
+  return 15_000;
 }

@@ -1,9 +1,15 @@
 import axios from "axios";
 import { getCache, getCacheState, setCache } from "./cache";
 import { getInflight, runOnce } from "./inflight";
-import { markApiCall, markCacheHit, markCacheMiss } from "./stats";
+import {
+  markApiCall,
+  markCacheHit,
+  markCacheMiss,
+  syncProviderQuota,
+} from "./stats";
 
 const PREMATCH_DEBUG = (process.env.PREMATCH_DEBUG ?? "false").toLowerCase() === "true";
+import { isApiEcoMode } from "./runtimeMode";
 
 function prematchDebug(label: string, payload?: Record<string, unknown>) {
   if (!PREMATCH_DEBUG) return;
@@ -35,10 +41,18 @@ function logDiscard(
   prematchDebug(`discard:${reason}`, payload);
 }
 
+type BookmakerOffer = {
+  bookmaker: string;
+  odd: number;
+};
+
 type OddsSnapshot = {
   goal: number | null;
   over25: number | null;
   under25: number | null;
+  goalOffers: BookmakerOffer[];
+  over25Offers: BookmakerOffer[];
+  under25Offers: BookmakerOffer[];
 };
 
 type TeamSplitStats = {
@@ -90,6 +104,9 @@ type PrematchPick = {
     goal: number | null;
     over25: number | null;
     under25: number | null;
+    goalOffers: BookmakerOffer[];
+    over25Offers: BookmakerOffer[];
+    under25Offers: BookmakerOffer[];
   };
   recommendedBet: string;
   insightLine: string;
@@ -303,15 +320,23 @@ function apiKey(): string {
 
 async function apiGet(path: string, params?: Record<string, any>): Promise<any> {
   markApiCall("brainPrematch");
+  const quotaRequestedAt = Date.now();
 
-  const res = await axios.get(`${BASE_URL}${path}`, {
-    headers: {
-      "x-apisports-key": apiKey(),
-      Accept: "application/json",
-    },
-    params,
-    timeout: 10000,
-  });
+  let res;
+  try {
+    res = await axios.get(`${BASE_URL}${path}`, {
+      headers: {
+        "x-apisports-key": apiKey(),
+        Accept: "application/json",
+      },
+      params,
+      timeout: 10000,
+    });
+    syncProviderQuota(res.headers, quotaRequestedAt);
+  } catch (error: any) {
+    syncProviderQuota(error?.response?.headers, quotaRequestedAt);
+    throw error;
+  }
 
   return res.data;
 }
@@ -399,7 +424,7 @@ async function getFixturesByDateLocal(date: string): Promise<any> {
 
   return runOnce(cacheKey, async () => {
     const data = await apiGet("/fixtures", { date });
-    setCache(cacheKey, data, 600, 30 * 60);
+    setCache(cacheKey, data, isApiEcoMode() ? 6 * 60 * 60 : 600, 30 * 60);
     return data;
   });
 }
@@ -427,6 +452,36 @@ async function getTeamCompetitionFixturesLocal(
     });
 
     setCache(cacheKey, data, 6 * 60 * 60, 24 * 60 * 60);
+    return data;
+  });
+}
+
+async function getTeamSeasonFixturesLocal(teamId: number, season: number): Promise<any> {
+  const cacheKey = `brainPrematch_teamSeasonFixtures_${teamId}_${season}`;
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+  markCacheMiss();
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/fixtures", { team: teamId, season });
+    setCache(cacheKey, data, 6 * 60 * 60, 24 * 60 * 60);
+    return data;
+  });
+}
+
+async function getTeamRecentFixturesLocal(teamId: number): Promise<any> {
+  const cacheKey = `brainPrematch_teamRecentAll_${teamId}_5`;
+  const cached = getCache<any>(cacheKey);
+  if (cached) {
+    markCacheHit();
+    return cached;
+  }
+  markCacheMiss();
+  return runOnce(cacheKey, async () => {
+    const data = await apiGet("/fixtures", { team: teamId, last: 5 });
+    setCache(cacheKey, data, isApiEcoMode() ? 6 * 60 * 60 : 60 * 60, 6 * 60 * 60);
     return data;
   });
 }
@@ -466,7 +521,7 @@ async function getFixtureOddsLocal(fixtureId: number): Promise<any> {
 
   return runOnce(cacheKey, async () => {
     const data = await apiGet("/odds", { fixture: fixtureId });
-    setCache(cacheKey, data, 15 * 60, 2 * 60 * 60);
+    setCache(cacheKey, data, isApiEcoMode() ? 6 * 60 * 60 : 15 * 60, 2 * 60 * 60);
     return data;
   });
 }
@@ -476,11 +531,15 @@ function extractOddsSnapshot(raw: any): OddsSnapshot {
   let goal: number | null = null;
   let over25: number | null = null;
   let under25: number | null = null;
+  const goalOffers: BookmakerOffer[] = [];
+  const over25Offers: BookmakerOffer[] = [];
+  const under25Offers: BookmakerOffer[] = [];
 
   for (const item of response) {
     const bookmakers = Array.isArray(item?.bookmakers) ? item.bookmakers : [];
 
     for (const bookmaker of bookmakers) {
+      const bookmakerName = String(bookmaker?.name ?? "Bookmaker").trim() || "Bookmaker";
       const bets = Array.isArray(bookmaker?.bets) ? bookmaker.bets : [];
 
       for (const bet of bets) {
@@ -499,6 +558,7 @@ function extractOddsSnapshot(raw: any): OddsSnapshot {
 
             if (valueLabel === "yes" || valueLabel === "si" || valueLabel === "sì") {
               goal = goal == null ? odd : Math.min(goal, odd);
+              goalOffers.push({ bookmaker: bookmakerName, odd });
             }
           }
         }
@@ -515,10 +575,12 @@ function extractOddsSnapshot(raw: any): OddsSnapshot {
 
             if (valueLabel === "over 2.5" || valueLabel === "over 2.5 goals") {
               over25 = over25 == null ? odd : Math.min(over25, odd);
+              over25Offers.push({ bookmaker: bookmakerName, odd });
             }
 
             if (valueLabel === "under 2.5" || valueLabel === "under 2.5 goals") {
               under25 = under25 == null ? odd : Math.min(under25, odd);
+              under25Offers.push({ bookmaker: bookmakerName, odd });
             }
           }
         }
@@ -526,7 +588,24 @@ function extractOddsSnapshot(raw: any): OddsSnapshot {
     }
   }
 
-  return { goal, over25, under25 };
+  const topOffers = (offers: BookmakerOffer[]) => {
+    const bestByBookmaker = new Map<string, BookmakerOffer>();
+    for (const offer of offers) {
+      const key = offer.bookmaker.toLowerCase();
+      const current = bestByBookmaker.get(key);
+      if (!current || offer.odd > current.odd) bestByBookmaker.set(key, offer);
+    }
+    return [...bestByBookmaker.values()].sort((a, b) => b.odd - a.odd).slice(0, 3);
+  };
+
+  return {
+    goal,
+    over25,
+    under25,
+    goalOffers: topOffers(goalOffers),
+    over25Offers: topOffers(over25Offers),
+    under25Offers: topOffers(under25Offers),
+  };
 }
 
 function emptySplitStats(): TeamSplitStats {
@@ -864,6 +943,61 @@ function getFixtureSeason(f: any): number {
   if (Number.isFinite(yearFromDate) && yearFromDate > 2000) return yearFromDate;
 
   return new Date().getUTCFullYear();
+}
+
+function h2hAsTeamStats(h2h: H2HStats, homeSide: boolean): TeamSplitStats {
+  if (!h2h.matches) return emptySplitStats();
+  const goalsFor = homeSide ? h2h.goalsForHomeTeam : h2h.goalsForAwayTeam;
+  const goalsAgainst = homeSide ? h2h.goalsForAwayTeam : h2h.goalsForHomeTeam;
+  return {
+    matches: h2h.matches,
+    goalsFor,
+    goalsAgainst,
+    avgGoalsFor: goalsFor / h2h.matches,
+    avgGoalsAgainst: goalsAgainst / h2h.matches,
+    avgTotalGoals: h2h.avgTotalGoals,
+    bttsRate: h2h.bttsRate,
+    over25Rate: h2h.over25Rate,
+    scoredRate: h2h.bttsRate,
+    concededRate: h2h.bttsRate,
+    failedToScoreRate: 1 - h2h.bttsRate,
+    cleanSheetRate: 1 - h2h.bttsRate,
+  };
+}
+
+function blendEarlySeasonStats(
+  previous: TeamSplitStats,
+  h2h: TeamSplitStats,
+  recentAll: TeamSplitStats,
+  current: TeamSplitStats
+): TeamSplitStats {
+  const sources: Array<[TeamSplitStats, number]> = [
+    [previous, 0.40],
+    [h2h, 0.30],
+    [recentAll, 0.20],
+    [current, 0.10],
+  ];
+  const available = sources.filter(([stats]) => stats.matches > 0);
+  if (!available.length) return emptySplitStats();
+  const totalWeight = available.reduce((sum, [, weight]) => sum + weight, 0);
+  const weighted = (field: keyof TeamSplitStats) =>
+    available.reduce((sum, [stats, weight]) => sum + Number(stats[field]) * weight, 0) /
+    totalWeight;
+
+  return {
+    matches: Math.round(weighted("matches")),
+    goalsFor: weighted("goalsFor"),
+    goalsAgainst: weighted("goalsAgainst"),
+    avgGoalsFor: weighted("avgGoalsFor"),
+    avgGoalsAgainst: weighted("avgGoalsAgainst"),
+    avgTotalGoals: weighted("avgTotalGoals"),
+    bttsRate: weighted("bttsRate"),
+    over25Rate: weighted("over25Rate"),
+    scoredRate: weighted("scoredRate"),
+    concededRate: weighted("concededRate"),
+    failedToScoreRate: weighted("failedToScoreRate"),
+    cleanSheetRate: weighted("cleanSheetRate"),
+  };
 }
 
 function evaluatePrematch(
@@ -1465,6 +1599,9 @@ function buildPrematchPickFromEvaluation(
       goal: odds.goal,
       over25: odds.over25,
       under25: odds.under25,
+      goalOffers: odds.goalOffers,
+      over25Offers: odds.over25Offers,
+      under25Offers: odds.under25Offers,
     },
     recommendedBet: evaluated.bestBet,
     insightLine,
@@ -1603,14 +1740,54 @@ async function computeBrainPrematch(
         getTeamCompetitionFixturesLocal(awayId, season, leagueId).catch(() => null),
       ]);
 
-      const overallHome = buildOverallStats(homeCompetitionRaw, homeId);
-      const overallAway = buildOverallStats(awayCompetitionRaw, awayId);
-      const splitHome = buildHomeOnlyStats(homeCompetitionRaw, homeId);
-      const splitAway = buildAwayOnlyStats(awayCompetitionRaw, awayId);
-      const recentHome = buildRecentCompetitionStats(homeCompetitionRaw, homeId, RECENT_MATCHES);
-      const recentAway = buildRecentCompetitionStats(awayCompetitionRaw, awayId, RECENT_MATCHES);
+      let overallHome = buildOverallStats(homeCompetitionRaw, homeId);
+      let overallAway = buildOverallStats(awayCompetitionRaw, awayId);
+      let splitHome = buildHomeOnlyStats(homeCompetitionRaw, homeId);
+      let splitAway = buildAwayOnlyStats(awayCompetitionRaw, awayId);
+      let recentHome = buildRecentCompetitionStats(homeCompetitionRaw, homeId, RECENT_MATCHES);
+      let recentAway = buildRecentCompetitionStats(awayCompetitionRaw, awayId, RECENT_MATCHES);
 
-      if (overallHome.matches < 6 || overallAway.matches < 6) {
+      const earlySeasonMode = overallHome.matches <= 3 && overallAway.matches <= 3;
+      const h2hRaw = await getHeadToHeadLocal(homeId, awayId).catch(() => null);
+      const h2h = buildH2HStats(h2hRaw, homeId, awayId, 5);
+
+      if (earlySeasonMode) {
+        const [previousHomeRaw, previousAwayRaw, recentAllHomeRaw, recentAllAwayRaw] =
+          await Promise.all([
+            getTeamSeasonFixturesLocal(homeId, season - 1).catch(() => null),
+            getTeamSeasonFixturesLocal(awayId, season - 1).catch(() => null),
+            getTeamRecentFixturesLocal(homeId).catch(() => null),
+            getTeamRecentFixturesLocal(awayId).catch(() => null),
+          ]);
+
+        const blendedHome = blendEarlySeasonStats(
+          buildOverallStats(previousHomeRaw, homeId),
+          h2hAsTeamStats(h2h, true),
+          buildRecentCompetitionStats(recentAllHomeRaw, homeId, 5),
+          overallHome
+        );
+        const blendedAway = blendEarlySeasonStats(
+          buildOverallStats(previousAwayRaw, awayId),
+          h2hAsTeamStats(h2h, false),
+          buildRecentCompetitionStats(recentAllAwayRaw, awayId, 5),
+          overallAway
+        );
+
+        overallHome = blendedHome;
+        overallAway = blendedAway;
+        splitHome = blendedHome;
+        splitAway = blendedAway;
+        recentHome = buildRecentCompetitionStats(recentAllHomeRaw, homeId, 5);
+        recentAway = buildRecentCompetitionStats(recentAllAwayRaw, awayId, 5);
+
+        prematchDebug("early_season_weights", {
+          fixtureId,
+          contextType,
+          weights: { previousSeason: 0.40, headToHead: 0.30, recentAll: 0.20, currentCompetition: 0.10 },
+        });
+      }
+
+      if (!earlySeasonMode && (overallHome.matches < 4 || overallAway.matches < 4)) {
         logDiscard("insufficient_scoring_data", {
           fixtureId,
           home: homeName,
@@ -1621,13 +1798,13 @@ async function computeBrainPrematch(
           extra: {
             overallHomeMatches: overallHome.matches,
             overallAwayMatches: overallAway.matches,
-            requiredOverallMatches: 6,
+            requiredOverallMatches: 4,
           },
         });
         continue;
       }
 
-      if (splitHome.matches < 4 || splitAway.matches < 4) {
+      if (!earlySeasonMode && (splitHome.matches < 2 || splitAway.matches < 2)) {
         logDiscard("insufficient_scoring_data", {
           fixtureId,
           home: homeName,
@@ -1638,13 +1815,13 @@ async function computeBrainPrematch(
           extra: {
             splitHomeMatches: splitHome.matches,
             splitAwayMatches: splitAway.matches,
-            requiredSplitMatches: 4,
+            requiredSplitMatches: 2,
           },
         });
         continue;
       }
 
-      if (recentHome.matches < 3 || recentAway.matches < 3) {
+      if (!earlySeasonMode && (recentHome.matches < 3 || recentAway.matches < 3)) {
         logDiscard("missing_form_data", {
           fixtureId,
           home: homeName,
@@ -1660,9 +1837,6 @@ async function computeBrainPrematch(
         });
         continue;
       }
-
-      const h2hRaw = await getHeadToHeadLocal(homeId, awayId).catch(() => null);
-      const h2h = buildH2HStats(h2hRaw, homeId, awayId, 5);
 
       const evaluated = evaluatePrematch(
         f,
@@ -1835,7 +2009,12 @@ async function computeBrainPrematch(
     candidates: finalCandidates,
   };
 
-  setCache(cacheKey, result, 30 * 60, 6 * 60 * 60);
+  setCache(
+    cacheKey,
+    result,
+    isApiEcoMode() ? 6 * 60 * 60 : 30 * 60,
+    6 * 60 * 60,
+  );
   return result;
 }
 

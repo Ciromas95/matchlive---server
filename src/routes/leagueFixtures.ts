@@ -32,7 +32,7 @@ router.get("/compact", async (req: Request, res: Response) => {
 
     console.error("LEAGUE FIXTURES COMPACT ERROR:", status, details);
 
-    return res.status(500).json({
+    return res.status(status && status >= 400 ? status : 500).json({
       error: "API-Football error",
       status,
       details,

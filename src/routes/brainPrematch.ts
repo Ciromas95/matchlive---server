@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import * as brainPrematchModule from "../brainPrematch";
+import * as brainPrematchModule from "../brainPrematchV3";
 import * as apiFootball from "../apiFootball";
 import {
   getPrematchStats,
@@ -26,16 +26,17 @@ brainPrematchRouter.get("/prematch", async (req: Request, res: Response) => {
     }
 
     const date = String(req.query.date ?? "").trim();
-    const maxMatchesParam = Number(req.query.maxMatches ?? 5);
-    const maxMatches = Math.max(1, Math.min(maxMatchesParam || 5, 10));
+    const maxMatchesParam = Number(req.query.maxMatches ?? 48);
+    const maxMatches = Math.max(1, Math.min(maxMatchesParam || 48, 48));
 
     if (!date) {
       return res.status(400).json({ error: "Missing date" });
     }
 
     const result = await buildBrainPrematch(date, maxMatches);
-    await reconcilePrematchPicks((pendingDate) =>
-      apiFootball.getFixturesByDate(pendingDate, "brainPrematch")
+    await reconcilePrematchPicks(
+      (pendingDate) => apiFootball.getFixturesByDate(pendingDate, "brainPrematch"),
+      (fixtureId) => apiFootball.getFixtureStatisticsCached(fixtureId, "brainPrematch"),
     );
     await registerPrematchPicks(result.picks);
     const stats = await getPrematchStats();

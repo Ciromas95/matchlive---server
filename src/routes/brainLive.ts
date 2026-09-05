@@ -7,20 +7,6 @@ import {
 
 const brainLiveRouter = express.Router();
 
-function toSharedPick(candidate: any, index: number) {
-  const lightScore = Number(candidate?.lightScore ?? 0);
-  const isHot = index === 0 && lightScore >= 55;
-  return {
-    ...candidate,
-    tagType: isHot ? "hot" : "interesting",
-    badgeText: isHot ? "HOT MATCH" : "MATCH INTERESSANTE",
-    finalScore: Math.round(lightScore),
-    phase: candidate?.statusShort ?? null,
-    phaseElapsed: candidate?.elapsed ?? null,
-    interestingMicroInsight: candidate?.scoreHint ?? "Match vivo e aperto",
-  };
-}
-
 brainLiveRouter.get("/live", async (req: Request, res: Response) => {
   try {
     res.setHeader(
@@ -39,15 +25,14 @@ brainLiveRouter.get("/live", async (req: Request, res: Response) => {
     const candidates = Array.isArray(rawResult?.candidates)
       ? rawResult.candidates
       : [];
-    const picks = candidates.map(toSharedPick);
-    const hot = picks.length > 0 ? picks[0] : null;
-    const others = picks.slice(1);
+    const hot = rawResult.hot ?? null;
+    const others = Array.isArray(rawResult.others) ? rawResult.others : [];
 
     return res.json({
       updatedAt: new Date().toISOString(),
       cached: Boolean(cached),
       generatedNow: Boolean(!cached && onDemand),
-      results: picks.length,
+      results: (hot == null ? 0 : 1) + others.length,
 
       candidates,
       hot,

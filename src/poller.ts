@@ -1,6 +1,7 @@
+import { runtimeModeStore } from "./runtimeMode";
 import { getFixtureById, getLiveFixtures } from "./apiFootball";
 import { broadcast, clientsCount } from "./stream";
-import { liveTtlMs } from "./ttl";
+import { isApiEcoMode, liveTtlMs } from "./ttl";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 import { pushEnabled, sendFixturePush } from "./push";
 
@@ -45,25 +46,77 @@ function matchName(f: any) {
   return `${f?.teams?.home?.name ?? "Casa"} – ${f?.teams?.away?.name ?? "Trasferta"}`;
 }
 
+function eventMinute(ev: any) {
+  const elapsed = Number(ev?.time?.elapsed);
+  const extra = Number(ev?.time?.extra);
+  if (!Number.isFinite(elapsed)) return "";
+  return `${elapsed}${Number.isFinite(extra) && extra > 0 ? `+${extra}` : ""}′`;
+}
+
+function fixtureImage(f: any, teamId?: number | null) {
+  const home = f?.teams?.home;
+  const away = f?.teams?.away;
+  if (teamId != null && Number(home?.id) === Number(teamId)) return String(home?.logo ?? "");
+  if (teamId != null && Number(away?.id) === Number(teamId)) return String(away?.logo ?? "");
+  // Per gli eventi neutri (inizio/fine) mostriamo comunque una squadra:
+  // il logo della competizione resta solo come ultimo ripiego.
+  return String(home?.logo ?? away?.logo ?? f?.league?.logo ?? "");
+}
+
+function premiumScoreLine(
+  f: any,
+  highlightedTeamId?: number | null,
+  event: "goal" | "red" | null = null,
+) {
+  const home = f?.teams?.home;
+  const away = f?.teams?.away;
+  const homeName = String(home?.name ?? "Casa");
+  const awayName = String(away?.name ?? "Trasferta");
+  const homeGoals = Number(f?.goals?.home ?? 0);
+  const awayGoals = Number(f?.goals?.away ?? 0);
+  const homeHighlighted = Number(home?.id) === Number(highlightedTeamId);
+  const awayHighlighted = Number(away?.id) === Number(highlightedTeamId);
+  const homeScore = event === "goal" && homeHighlighted ? `[${homeGoals}]` : String(homeGoals);
+  const awayScore = event === "goal" && awayHighlighted ? `[${awayGoals}]` : String(awayGoals);
+  const homeCard = event === "red" && homeHighlighted ? " 🟥" : "";
+  const awayCard = event === "red" && awayHighlighted ? "🟥 " : "";
+  return `${homeName}${homeCard}  ${homeScore}  •  ${awayScore}  ${awayCard}${awayName}`;
+}
+
 async function sendNewEventPush(f: any, ev: any, fixtureId: number) {
   const type = String(ev?.type ?? "").toLowerCase();
   const detail = String(ev?.detail ?? "").toLowerCase();
-  const player = String(ev?.player?.name ?? "").trim();
   const team = String(ev?.team?.name ?? "").trim();
   const score = `${f?.goals?.home ?? 0}-${f?.goals?.away ?? 0}`;
   const fixture = matchName(f);
+  const teamId = Number(ev?.team?.id) || null;
+  const imageUrl = fixtureImage(f, teamId);
+  const minute = eventMinute(ev);
+  const common = {
+    imageUrl,
+    homeName: String(f?.teams?.home?.name ?? ""),
+    awayName: String(f?.teams?.away?.name ?? ""),
+    homeLogo: String(f?.teams?.home?.logo ?? ""),
+    awayLogo: String(f?.teams?.away?.logo ?? ""),
+    teamName: team,
+    minute,
+    score,
+  };
   if (type === "goal") {
-    await Promise.all([
-      sendFixturePush(fixtureId, "goal", "GOAL", `${team || fixture} · ${score}`),
-      sendFixturePush(fixtureId, "scorer", player || "Marcatore", `${team || fixture} · ${score}`),
-      sendFixturePush(fixtureId, "goal_scorer", `GOAL${player ? ` · ${player}` : ""}`, `${team || fixture} · ${score}`),
-    ]);
+    await sendFixturePush(
+      fixtureId,
+      "goal",
+      `⚽ GOOOL · ${team || "RETE"}`,
+      `${premiumScoreLine(f, teamId, "goal")}${minute ? ` · ${minute}` : ""}`,
+      common,
+    );
   } else if (type === "card" && (detail.includes("red") || detail.includes("second yellow"))) {
     await sendFixturePush(
       fixtureId,
       "red",
-      `Espulsione${player ? ` · ${player}` : ""}`,
-      team || fixture,
+      `🟥 ESPULSIONE · ${team || "CARTELLINO ROSSO"}`,
+      `${premiumScoreLine(f, teamId, "red")}${minute ? ` · ${minute}` : ""}`,
+      common,
     );
   }
 }
@@ -81,8 +134,16 @@ async function checkFinishedFixtures(liveIds: Set<number>) {
       await sendFixturePush(
         fixtureId,
         "finished",
-        "Partita terminata",
-        `${matchName(fixture)} · ${score}`,
+        "🏁 TRIPLICE FISCHIO",
+        `${String(fixture?.teams?.home?.name ?? "Casa")}  ${fixture?.goals?.home ?? 0}  •  ${fixture?.goals?.away ?? 0}  ${String(fixture?.teams?.away?.name ?? "Trasferta")}`,
+        {
+          imageUrl: fixtureImage(fixture),
+          score,
+          homeName: String(fixture?.teams?.home?.name ?? ""),
+          awayName: String(fixture?.teams?.away?.name ?? ""),
+          homeLogo: String(fixture?.teams?.home?.logo ?? ""),
+          awayLogo: String(fixture?.teams?.away?.logo ?? ""),
+        },
       );
       trackedLive.delete(fixtureId);
     } else if (tracked.missing >= 5) {
@@ -107,7 +168,7 @@ export function startPoller() {
         return;
       }
 
-      const data = await getLiveFixtures("live");
+      const data = await getLiveFixtures("live", true);
       const fixtures = Array.isArray(data?.response) ? data.response : [];
       const liveCount = fixtures.length;
 
@@ -126,8 +187,16 @@ export function startPoller() {
           await sendFixturePush(
             fixtureId,
             "kickoff",
-            "Partita iniziata",
-            matchName(f),
+            "🏟️ SI COMINCIA",
+            `${String(f?.teams?.home?.name ?? "Casa")}  0  •  0  ${String(f?.teams?.away?.name ?? "Trasferta")}`,
+            {
+              imageUrl: fixtureImage(f),
+              homeName: String(f?.teams?.home?.name ?? ""),
+              awayName: String(f?.teams?.away?.name ?? ""),
+              homeLogo: String(f?.teams?.home?.logo ?? ""),
+              awayLogo: String(f?.teams?.away?.logo ?? ""),
+              score: "0-0",
+            },
           );
         }
 
@@ -173,13 +242,16 @@ export function startPoller() {
       await checkFinishedFixtures(liveIds);
 
       // Poll dinamico coerente con la cache TTL live (ms)
-      const nextMs = Math.max(4000, liveTtlMs(liveCount) + 300);
+      const nextMs = isApiEcoMode()
+        ? Math.max(65_000, liveTtlMs(liveCount) + 2_000)
+        : Math.max(15_000, liveTtlMs(liveCount));
       scheduleNext(nextMs);
     } catch (e: any) {
       console.error("poller error:", e?.message || e);
-      scheduleNext(15000);
+      scheduleNext(isApiEcoMode() ? 3 * 60_000 : 15_000);
     }
   };
 
+  runtimeModeStore().subscribe(mode => scheduleNext(mode === "eco" ? 65_000 : 1000));
   run();
 }

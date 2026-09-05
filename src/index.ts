@@ -1,7 +1,7 @@
+import { runtimeModeStore } from "./runtimeMode";
 import express, { Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 import cors from "cors";
-import crypto from "crypto";
 
 import * as apiFootball from "./apiFootball";
 import { flagUrlFromCountryName } from "./flags";
@@ -9,12 +9,16 @@ import { toLiveCompact } from "./compact";
 import { addClient, removeClient } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
-import { cacheSize, cacheSnapshot } from "./cache";
+import { refreshProviderQuota } from "./providerQuotaSync";
+import { cacheSize, cacheSnapshot, expireLiveCaches } from "./cache";
 import { inflightSize } from "./inflight";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
 import brainLiveRouter from "./routes/brainLive";
 import * as brainLiveModule from "./brainLive";
+import { configuredAdminSessionStore } from "./adminSessions";
+import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
+import { sendAdminPushTest } from "./push";
 
 dotenv.config();
 
@@ -136,40 +140,9 @@ const REQUIRE_KEY = (process.env.REQUIRE_KEY ?? "true").toLowerCase() === "true"
 // Admin auth
 // ===============================
 const ADMIN_PIN = (process.env.ADMIN_PIN ?? "").trim();
-const ADMIN_TOKEN_SECRET = (process.env.ADMIN_TOKEN_SECRET ?? "").trim();
-const ADMIN_TOKEN_TTL_MIN = Number(process.env.ADMIN_TOKEN_TTL_MIN ?? "1440");
-
-type AdminSession = {
-  exp: number;
-};
-
-const adminSessions = new Map<string, AdminSession>();
-
-function cleanupAdminSessions() {
-  const now = Date.now();
-
-  for (const [token, session] of adminSessions.entries()) {
-    if (session.exp <= now) {
-      adminSessions.delete(token);
-    }
-  }
-}
-
-setInterval(cleanupAdminSessions, 60_000);
-
-function makeToken() {
-  const rand = crypto.randomBytes(32).toString("hex");
-
-  if (!ADMIN_TOKEN_SECRET) {
-    return rand;
-  }
-
-  return crypto.createHash("sha256").update(rand + ADMIN_TOKEN_SECRET).digest("hex");
-}
+const adminSessions = configuredAdminSessionStore();
 
 function requireAdminToken(req: Request, res: Response, next: NextFunction) {
-  cleanupAdminSessions();
-
   const auth = (req.header("authorization") ?? "").trim();
   const token = auth.toLowerCase().startsWith("bearer ")
     ? auth.slice(7).trim()
@@ -179,15 +152,12 @@ function requireAdminToken(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "Missing token" });
   }
 
-  const session = adminSessions.get(token);
-
-  if (!session) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  if (session.exp <= Date.now()) {
-    adminSessions.delete(token);
-    return res.status(401).json({ error: "Token expired" });
+  try {
+    if (!adminSessions.has(token)) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+  } catch {
+    return res.status(503).json({ error: "Session store unavailable" });
   }
 
   next();
@@ -274,18 +244,48 @@ app.post("/api/admin/login", (req: Request, res: Response) => {
     return res.status(401).json({ error: "Wrong pin" });
   }
 
-  const token = makeToken();
-  const exp = Date.now() + ADMIN_TOKEN_TTL_MIN * 60_000;
-
-  adminSessions.set(token, { exp });
-
-  return res.json({
-    token,
-    expiresAt: new Date(exp).toISOString(),
-  });
+  try {
+    const token = adminSessions.create();
+    return res.json({ token, expiresAt: null });
+  } catch {
+    return res.status(503).json({ error: "Session store unavailable" });
+  }
 });
 
-app.get("/api/admin/stats", requireAdminToken, (_req: Request, res: Response) => {
+app.post("/api/admin/logout", requireAdminToken, (req: Request, res: Response) => {
+  const token = (req.header("authorization") ?? "").slice(7).trim();
+  try {
+    adminSessions.revoke(token);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(503).json({ error: "Session store unavailable" });
+  }
+});
+
+app.get("/api/admin/runtime-mode", requireAdminToken, (_req, res) => {
+  res.json({ mode: runtimeModeStore().get() });
+});
+app.post("/api/admin/runtime-mode", requireAdminToken, (req, res) => {
+  const mode = req.body?.mode;
+  if (mode !== "eco" && mode !== "fast") return res.status(400).json({ error: "Invalid mode" });
+  try {
+    const previous = runtimeModeStore().get();
+    runtimeModeStore().set(mode);
+    if (previous !== mode && mode === "fast") expireLiveCaches();
+    return res.json({ mode });
+  } catch {
+    return res.status(503).json({ error: "Impossibile salvare la modalità" });
+  }
+});
+
+app.post("/api/admin/push-test", requireAdminToken, async (_req, res) => {
+  const sent = await sendAdminPushTest();
+  if (!sent) return res.status(503).json({ error: "Push Firebase non disponibile" });
+  return res.json({ ok: true });
+});
+
+app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Response) => {
+  await refreshProviderQuota();
   ensureUsersDay();
   const stats = getApiStats();
   const cache = cacheSnapshot();
@@ -315,8 +315,10 @@ app.get("/api/live", async (_req: Request, res: Response) => {
     return res.json(data);
   } catch (e: any) {
     console.error("LIVE ERROR:", e?.response?.data ?? e?.message ?? e);
-    return res.status(500).json({
+    const status = e?.response?.status;
+    return res.status(status && status >= 400 ? status : 500).json({
       error: "API-Football error",
+      status,
       details: e?.response?.data ?? e?.message ?? e,
     });
   }
@@ -335,8 +337,10 @@ app.get("/api/live/compact", async (_req: Request, res: Response) => {
     });
   } catch (e: any) {
     console.error("LIVE COMPACT ERROR:", e?.response?.data ?? e?.message ?? e);
-    return res.status(500).json({
+    const status = e?.response?.status;
+    return res.status(status && status >= 400 ? status : 500).json({
       error: "API-Football error",
+      status,
       details: e?.response?.data ?? e?.message ?? e,
     });
   }
@@ -349,6 +353,10 @@ app.get("/api/players/flags", async (req: Request, res: Response) => {
   try {
     const team = Number(req.query.team);
     const season = Number(req.query.season);
+    const playerIds = String(req.query.playerIds ?? "")
+      .split(",")
+      .map((v) => Number(v.trim()))
+      .filter((v) => Number.isInteger(v) && v > 0);
 
     if (!team || !season) {
       return res.status(400).json({ error: "Missing team or season" });
@@ -358,10 +366,9 @@ app.get("/api/players/flags", async (req: Request, res: Response) => {
     const resp = Array.isArray(data?.response) ? data.response : [];
     const map: Record<string, { nationality: string | null; flagUrl: string | null }> = {};
 
-    for (const item of resp) {
-      const p = item?.player;
+    const addPlayerFlag = (p: any) => {
       const id = p?.id;
-      if (!id) continue;
+      if (!id) return;
 
       const nationality = String(p?.nationality || p?.birth?.country || "").trim();
       const flagUrl = flagUrlFromCountryName(nationality, 40);
@@ -370,6 +377,22 @@ app.get("/api/players/flags", async (req: Request, res: Response) => {
         nationality: nationality || null,
         flagUrl,
       };
+    };
+
+    for (const item of resp) {
+      addPlayerFlag(item?.player);
+    }
+
+    const missingPlayerIds = [...new Set(playerIds)]
+      .filter((playerId) => !map[String(playerId)])
+      .slice(0, 30);
+
+    for (const playerId of missingPlayerIds) {
+      const playerData = await apiFootball.getPlayerById(playerId, season);
+      const playerResp = Array.isArray(playerData?.response)
+        ? playerData.response
+        : [];
+      addPlayerFlag(playerResp[0]?.player);
     }
 
     return res.json({
@@ -388,6 +411,46 @@ app.get("/api/players/flags", async (req: Request, res: Response) => {
 // Routers
 // ===============================
 app.use("/api/league/fixtures", leagueFixturesRouter);
+app.get("/api/standings", async (req: Request, res: Response) => {
+  const leagueId = Number(req.query.leagueId);
+  const season = Number(req.query.season);
+  if (!Number.isInteger(leagueId) || leagueId <= 0 ||
+      !Number.isInteger(season) || season < 1900) {
+    return res.status(400).json({ error: "Missing or invalid leagueId/season" });
+  }
+  try {
+    const data = await apiFootball.getStandingsCached(leagueId, season);
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=60, s-maxage=3600, stale-while-revalidate=300",
+    );
+    return res.json(data);
+  } catch (error: any) {
+    const status = error?.response?.status;
+    return res.status(status && status >= 400 ? status : 502).json({
+      error: "Standings unavailable",
+    });
+  }
+});
+app.get("/api/fixtures/final", async (req: Request, res: Response) => {
+  const fixtureId = Number(req.query.id);
+  if (!Number.isInteger(fixtureId) || fixtureId <= 0) {
+    return res.status(400).json({ error: "Missing or invalid fixture id" });
+  }
+  try {
+    const data = await apiFootball.getFinishedFixtureDetailsCached(fixtureId);
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=300, s-maxage=86400, stale-while-revalidate=3600",
+    );
+    return res.json(data);
+  } catch (error: any) {
+    const status = error?.response?.status;
+    return res.status(status && status >= 400 ? status : 502).json({
+      error: "Finished fixture unavailable",
+    });
+  }
+});
 app.use("/api/brain", brainPrematchRouter);
 app.use("/api/brain", brainLiveRouter);
 
@@ -458,6 +521,7 @@ if (process.env.ENABLE_POLLER !== "false") {
 if (process.env.ENABLE_BRAIN_LIVE_POLLER !== "false") {
   brainLiveModule.startBrainLivePoller(8);
 }
+startBrainPrematchSchedulerV3();
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

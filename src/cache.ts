@@ -102,6 +102,15 @@ export function cacheSize() {
   return cache.size;
 }
 
+/** Preserve visible data while allowing live results to refresh in fast mode. */
+export function expireLiveCaches() {
+  for (const [key, entry] of cache) {
+    if (/live|brainPrematchV3:result/i.test(key)) {
+      entry.expiry = Math.min(entry.expiry, nowMs() - 1);
+    }
+  }
+}
+
 export function cacheSnapshot() {
   pruneExpired();
 
