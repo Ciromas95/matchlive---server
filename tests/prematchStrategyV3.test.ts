@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractOddsSnapshotV3, isUpcomingPrematchV3, buildWeightedRecentStatsV3 } from "../src/brainPrematchV3";
+import {
+  extractOddsSnapshotV3,
+  isUpcomingPrematchV3,
+  buildWeightedRecentStatsV3,
+  mergePublishedPrematchResults,
+} from "../src/brainPrematchV3";
 import {
   CoreMarketV3,
   CornerMarketV3,
@@ -221,4 +226,31 @@ test("un profilo tipo Chelsea-Brighton non viene scartato solo per la forma rece
     cornerMarkets: noCorners,
   });
   assert.ok(evaluation.selections.some((selection) => selection.market === "OVER 2.5"));
+});
+
+test("le nuove scansioni aggiungono card senza modificare quelle già pubblicate", () => {
+  const original = {
+    fixtureId: 1,
+    date: "2099-09-06T15:00:00+02:00",
+    recommendedBet: "GOAL",
+    odds: { selectedOdd: 1.62 },
+  } as any;
+  const recalculated = {
+    ...original,
+    recommendedBet: "OVER 2.5",
+    odds: { selectedOdd: 1.55 },
+  } as any;
+  const addition = {
+    fixtureId: 2,
+    date: "2099-09-06T18:00:00+02:00",
+    recommendedBet: "1X",
+  } as any;
+  const merged = mergePublishedPrematchResults(
+    { picks: [original], candidates: [] },
+    { picks: [recalculated, addition], candidates: [] },
+  );
+  assert.equal(merged.picks.length, 2);
+  assert.equal(merged.picks[0].recommendedBet, "GOAL");
+  assert.deepEqual(merged.picks[0].odds, { selectedOdd: 1.62 });
+  assert.equal(merged.picks[1].fixtureId, 2);
 });

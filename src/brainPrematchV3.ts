@@ -1190,6 +1190,25 @@ const publishedDailyResults = new Map<
   { picks: PrematchPickV3[]; candidates: never[] }
 >();
 
+/**
+ * Le analisi già pubblicate sono immutabili fino al calcio d'inizio. Una
+ * scansione successiva può solamente aggiungere nuovi incontri diventati
+ * valutabili quando il fornitore completa quote o statistiche.
+ */
+export function mergePublishedPrematchResults(
+  published: { picks: PrematchPickV3[]; candidates: never[] } | null,
+  scanned: { picks: PrematchPickV3[]; candidates: never[] },
+) {
+  const existing = visiblePicks(published?.picks ?? []);
+  const existingIds = new Set(existing.map((pick) => pick.fixtureId));
+  const additions = visiblePicks(scanned.picks)
+    .filter((pick) => !existingIds.has(pick.fixtureId));
+  return {
+    picks: [...existing, ...additions],
+    candidates: [] as never[],
+  };
+}
+
 export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promise<{
   picks: PrematchPickV3[];
   candidates: never[];
@@ -1203,44 +1222,28 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
       cacheState: "fresh",
     };
   }
-  const published = publishedDailyResults.get(date);
-  if (published) {
-    return {
-      ...published,
-      picks: visiblePicks(published.picks).slice(0, max),
-      cacheState: "fresh",
-    };
+  let published = publishedDailyResults.get(date) ?? null;
+  if (!published) {
+    published = await loadPublishedPrematchDay(date);
+    if (published) publishedDailyResults.set(date, published);
   }
-  const persisted = await loadPublishedPrematchDay(date);
-  if (persisted) {
-    publishedDailyResults.set(date, persisted);
-    return {
-      ...persisted,
-      picks: visiblePicks(persisted.picks).slice(0, max),
-      cacheState: "fresh",
-    };
-  }
-  // Un solo snapshot completo per giornata: maxMatches limita la risposta,
-  // non deve generare pubblicazioni differenti o rivalutare le quote.
-  const key = `brainPrematchV3:result:${date}:48:v4-robust-2`;
+  // Un solo risultato di scansione condiviso: maxMatches limita la risposta,
+  // non genera calcoli diversi per ciascun dispositivo.
+  const key = `brainPrematchV3:result:${date}:48:v4-robust-3`;
   const state = getCacheState<{ picks: PrematchPickV3[]; candidates: never[] }>(key);
   if (state.state === "fresh" && state.value) {
-    publishedDailyResults.set(date, state.value);
-    void savePublishedPrematchDay(date, state.value);
-    return { ...state.value, picks: visiblePicks(state.value.picks).slice(0, max), cacheState: "fresh" };
+    const merged = mergePublishedPrematchResults(published, state.value);
+    publishedDailyResults.set(date, merged);
+    void savePublishedPrematchDay(date, merged);
+    return { ...merged, picks: merged.picks.slice(0, max), cacheState: "fresh" };
   }
-  if (state.state === "stale" && state.value) {
-    publishedDailyResults.set(date, state.value);
-    void savePublishedPrematchDay(date, state.value);
-    return { ...state.value, picks: visiblePicks(state.value.picks).slice(0, max), cacheState: "stale" };
-  }
+  // Uno stato stale non diventa una sentenza definitiva: forza la scansione
+  // successiva, continuando poi a conservare ogni card già pubblicata.
   const fresh = await runOnce(key, () => compute(date, 48, key));
-  publishedDailyResults.set(date, {
-    picks: fresh.picks,
-    candidates: fresh.candidates,
-  });
-  await savePublishedPrematchDay(date, fresh);
-  return { ...fresh, picks: visiblePicks(fresh.picks).slice(0, max), cacheState: "miss" };
+  const merged = mergePublishedPrematchResults(published, fresh);
+  publishedDailyResults.set(date, merged);
+  await savePublishedPrematchDay(date, merged);
+  return { ...merged, picks: merged.picks.slice(0, max), cacheState: state.state === "stale" ? "stale" : "miss" };
 }
 
 async function compute(date: string, max: number, key: string) {
@@ -1284,11 +1287,16 @@ export default buildBrainPrematchV3;
 
 /** Pubblica la giornata alle 10:00 italiane senza dipendere dall'apertura dell'app. */
 export function startBrainPrematchSchedulerV3(): void {
-  let publishedDay = "";
+  let lastScanSlot = "";
   const tick = () => {
     const clock = italianClock();
-    if (clock.hour < 10 || publishedDay === clock.date) return;
-    publishedDay = clock.date;
+    // Finestra di assestamento limitata: recupera quote/dati arrivati tardi
+    // senza trasformare il Prematch in un polling costoso per tutta la giornata.
+    if (clock.hour < 10 || clock.hour >= 12) return;
+    const intervalMinutes = isApiEcoMode() ? 30 : 15;
+    const slot = `${clock.date}:${clock.hour}:${Math.floor(clock.minute / intervalMinutes)}`;
+    if (lastScanSlot === slot) return;
+    lastScanSlot = slot;
     void buildBrainPrematchV3(clock.date, 48)
       .then(async (result) => {
         if (result.picks.length > 0 && await claimPrematchNotification(clock.date)) {
@@ -1296,7 +1304,7 @@ export function startBrainPrematchSchedulerV3(): void {
         }
       })
       .catch((error) => {
-        publishedDay = "";
+        lastScanSlot = "";
         console.error("[prematch-v4] 10:00 refresh failed:", error?.message ?? error);
       });
   };
