@@ -25,6 +25,7 @@ import {
 import { evaluateStrategyV4 } from "./prematchStrategyV4";
 import { sendBrainPrematchPush } from "./push";
 import { claimPrematchNotification } from "./prematchNotificationState";
+import { loadPublishedPrematchDay, savePublishedPrematchDay } from "./prematchPublishedState";
 
 const BASE_URL = "https://v3.football.api-sports.io";
 import { isApiEcoMode } from "./runtimeMode";
@@ -1210,22 +1211,36 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
       cacheState: "fresh",
     };
   }
-  const key = `brainPrematchV3:result:${date}:${max}:v4-robust-1`;
+  const persisted = await loadPublishedPrematchDay(date);
+  if (persisted) {
+    publishedDailyResults.set(date, persisted);
+    return {
+      ...persisted,
+      picks: visiblePicks(persisted.picks).slice(0, max),
+      cacheState: "fresh",
+    };
+  }
+  // Un solo snapshot completo per giornata: maxMatches limita la risposta,
+  // non deve generare pubblicazioni differenti o rivalutare le quote.
+  const key = `brainPrematchV3:result:${date}:48:v4-robust-2`;
   const state = getCacheState<{ picks: PrematchPickV3[]; candidates: never[] }>(key);
   if (state.state === "fresh" && state.value) {
     publishedDailyResults.set(date, state.value);
-    return { ...state.value, picks: visiblePicks(state.value.picks), cacheState: "fresh" };
+    void savePublishedPrematchDay(date, state.value);
+    return { ...state.value, picks: visiblePicks(state.value.picks).slice(0, max), cacheState: "fresh" };
   }
   if (state.state === "stale" && state.value) {
     publishedDailyResults.set(date, state.value);
-    return { ...state.value, picks: visiblePicks(state.value.picks), cacheState: "stale" };
+    void savePublishedPrematchDay(date, state.value);
+    return { ...state.value, picks: visiblePicks(state.value.picks).slice(0, max), cacheState: "stale" };
   }
-  const fresh = await runOnce(key, () => compute(date, max, key));
+  const fresh = await runOnce(key, () => compute(date, 48, key));
   publishedDailyResults.set(date, {
     picks: fresh.picks,
     candidates: fresh.candidates,
   });
-  return { ...fresh, picks: visiblePicks(fresh.picks), cacheState: "miss" };
+  await savePublishedPrematchDay(date, fresh);
+  return { ...fresh, picks: visiblePicks(fresh.picks).slice(0, max), cacheState: "miss" };
 }
 
 async function compute(date: string, max: number, key: string) {

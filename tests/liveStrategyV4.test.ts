@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { evaluateLiveV4, LiveObservationV4, LiveStatsV4 } from "../src/liveStrategyV4";
+import { isLiveSignalDiscoveryMinute, shouldRetainLiveSignal } from "../src/brainLive";
 
 function stats(overrides: Partial<LiveStatsV4> = {}): LiveStatsV4 {
   return {
@@ -52,8 +53,8 @@ test("live V4: segnala entro il 30' la squadra sotto di un gol che domina", () =
   assert.equal(result?.goalTarget, "away");
 });
 
-test("live V4: non pubblica nuove analisi tra il 31' e l'intervallo", () => {
-  const result = evaluateLiveV4(observation(32, 1, 0, stats({
+test("live V4: non pubblica nuove analisi dal 35' all'intervallo", () => {
+  const result = evaluateLiveV4(observation(35, 1, 0, stats({
     shotsHome: 3, shotsAway: 13,
     shotsOnGoalHome: 1, shotsOnGoalAway: 6,
     cornersAway: 6, possessionHome: 34, possessionAway: 66,
@@ -72,6 +73,18 @@ test("live V4: non pubblica nuove analisi dopo l'80'", () => {
     phaseElapsed: 36,
   });
   assert.equal(result, null);
+});
+
+test("live: separa la finestra di scoperta dalla permanenza della card", () => {
+  assert.equal(isLiveSignalDiscoveryMinute(34), true);
+  assert.equal(isLiveSignalDiscoveryMinute(35), false);
+  assert.equal(isLiveSignalDiscoveryMinute(80), true);
+  assert.equal(isLiveSignalDiscoveryMinute(81), false);
+  assert.equal(shouldRetainLiveSignal(30, 44, "1H"), true);
+  assert.equal(shouldRetainLiveSignal(30, 45, "HT"), true);
+  assert.equal(shouldRetainLiveSignal(30, 46, "2H"), false);
+  assert.equal(shouldRetainLiveSignal(80, 88, "2H"), true);
+  assert.equal(shouldRetainLiveSignal(80, 89, "2H"), false);
 });
 
 test("live V4: scarta un incontro con due gol di distacco", () => {

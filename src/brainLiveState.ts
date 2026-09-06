@@ -7,6 +7,7 @@ export type PersistedBrainLiveState = {
   savedAt: string;
   halftimeBaselines: Record<string, LiveObservationV4>;
   activeSignalScore: Record<string, { home: number; away: number }>;
+  activeSignals?: Record<string, any>;
   cooldownUntilMinute: Record<string, number>;
   previousCandidateIds: number[];
 };
@@ -49,4 +50,3 @@ export async function saveBrainLiveState(state: Omit<PersistedBrainLiveState, "v
     console.error("[brain-live-state] write failed:", error?.message ?? error);
   }
 }
-

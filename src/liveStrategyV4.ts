@@ -83,7 +83,7 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
   const { elapsed, homeGoals, awayGoals, stats: s } = current;
   const phaseElapsed = current.phaseElapsed ?? elapsed;
   const insideBettingWindow =
-    (elapsed >= 4 && elapsed <= 30) || (elapsed >= 46 && elapsed <= 80);
+    (elapsed >= 4 && elapsed <= 34) || (elapsed >= 46 && elapsed <= 80);
   if (!insideBettingWindow || homeGoals + awayGoals >= 5) return null;
   if ([s.shotsHome, s.shotsAway, s.shotsOnGoalHome, s.shotsOnGoalAway].some((item) => item == null)) return null;
 

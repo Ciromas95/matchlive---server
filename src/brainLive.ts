@@ -57,6 +57,7 @@ const DEBUG_BRAIN_LIVE = false;
 const liveHistory = new Map<number, LiveObservationV4[]>();
 const halftimeBaselines = new Map<number, LiveObservationV4>();
 const activeSignalScore = new Map<number, { home: number; away: number }>();
+const activeSignals = new Map<number, any>();
 const cooldownUntilMinute = new Map<number, number>();
 let stateHydration: Promise<void> | null = null;
 
@@ -69,6 +70,9 @@ function hydratePersistentState() {
     for (const [id, value] of Object.entries(state.activeSignalScore ?? {})) {
       activeSignalScore.set(Number(id), value);
     }
+    for (const [id, value] of Object.entries(state.activeSignals ?? {})) {
+      activeSignals.set(Number(id), value);
+    }
     for (const [id, value] of Object.entries(state.cooldownUntilMinute ?? {})) {
       cooldownUntilMinute.set(Number(id), Number(value));
     }
@@ -80,6 +84,7 @@ function persistState() {
   return saveBrainLiveState({
     halftimeBaselines: Object.fromEntries(halftimeBaselines),
     activeSignalScore: Object.fromEntries(activeSignalScore),
+    activeSignals: Object.fromEntries(activeSignals),
     cooldownUntilMinute: Object.fromEntries(cooldownUntilMinute),
     previousCandidateIds: [...(previousCandidateIds ?? new Set<number>())],
   });
@@ -122,7 +127,7 @@ function statsForCurrentHalf(fixtureId: number, observation: LiveObservationV4):
   };
 }
 
-const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE", "INT"]);
+const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE"]);
 
 const ALLOWED_LEAGUE_IDS = new Set<number>([
   61,  // Ligue 1
@@ -213,11 +218,26 @@ function isUsefulLiveFixture(f: any): boolean {
 
   if (!LIVE_STATUSES.has(status)) return false;
   if (elapsed < 1) return false;
-  if (elapsed > 80 || (elapsed > 30 && elapsed < 46)) return false;
+  if (elapsed > 80 || (elapsed >= 35 && elapsed < 46)) return false;
   if (!isAllowedLeague(f)) return false;
   if (isYouthOrReserveFixture(f)) return false;
 
   return true;
+}
+
+export function isLiveSignalDiscoveryMinute(elapsed: number): boolean {
+  return (elapsed >= 4 && elapsed <= 34) || (elapsed >= 46 && elapsed <= 80);
+}
+
+export function shouldRetainLiveSignal(
+  discoveredAt: number,
+  currentElapsed: number,
+  statusShort: string,
+): boolean {
+  const status = statusShort.toUpperCase();
+  if (!["1H", "2H", "HT", "ET", "LIVE"].includes(status)) return false;
+  if (discoveredAt <= 45) return status === "1H" || status === "HT";
+  return currentElapsed <= 88;
 }
 
 function getScoreHint(f: any): string {
@@ -406,6 +426,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
       // Il risultato è cambiato: l'obiettivo della card precedente è concluso.
       // Ripartiamo da statistiche successive al gol dopo tre minuti di verifica.
       activeSignalScore.delete(id);
+      activeSignals.delete(id);
       cooldownUntilMinute.set(id, elapsed + 3);
       liveHistory.delete(id);
     }
@@ -448,17 +469,46 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
         home: candidate.home.goals,
         away: candidate.away.goals,
       });
-      return {
+      const published = {
         ...candidate,
         ...signal,
+        discoveredAt: candidate.elapsed,
         phase: observation.elapsed > 45 ? "2H" : "1H",
         phaseElapsed: observation.elapsed > 45
           ? observation.elapsed - 45
           : observation.elapsed,
         stats: observation.stats,
       };
+      activeSignals.set(candidate.fixtureId, published);
+      return published;
     }));
     evaluated.push(...batch.filter(Boolean));
+  }
+  const liveFixtureById = new Map(fixtures.map((fixture) => [Number(fixture?.fixture?.id ?? 0), fixture]));
+  for (const [fixtureId, signal] of [...activeSignals.entries()]) {
+    if (evaluated.some((candidate) => candidate.fixtureId === fixtureId)) continue;
+    const fixture = liveFixtureById.get(fixtureId);
+    const elapsed = Number(fixture?.fixture?.status?.elapsed ?? signal.elapsed ?? 0);
+    const statusShort = String(fixture?.fixture?.status?.short ?? "").toUpperCase();
+    const baseline = activeSignalScore.get(fixtureId);
+    const homeGoals = Number(fixture?.goals?.home ?? signal.home?.goals ?? 0);
+    const awayGoals = Number(fixture?.goals?.away ?? signal.away?.goals ?? 0);
+    const scoreChanged = baseline != null &&
+      (homeGoals !== baseline.home || awayGoals !== baseline.away);
+    if (!fixture || scoreChanged || !shouldRetainLiveSignal(
+      Number(signal.discoveredAt ?? signal.elapsed ?? 0), elapsed, statusShort,
+    )) {
+      activeSignals.delete(fixtureId);
+      if (!fixture || !LIVE_STATUSES.has(statusShort)) activeSignalScore.delete(fixtureId);
+      continue;
+    }
+    evaluated.push({
+      ...signal,
+      statusShort,
+      elapsed,
+      home: { ...signal.home, goals: homeGoals },
+      away: { ...signal.away, goals: awayGoals },
+    });
   }
   evaluated.sort((a, b) => b.finalScore - a.finalScore);
   const hot = evaluated.find((pick) => pick.tagType === "hot") ?? null;
