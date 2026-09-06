@@ -2,7 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 
 type PublishedPrematchState = {
-  version: 1;
+  version: 2;
   days: Record<string, { picks: any[]; candidates: never[] }>;
 };
 
@@ -17,7 +17,7 @@ const statePath = path.resolve(
 export async function loadPublishedPrematchDay(date: string) {
   try {
     const parsed = JSON.parse(await fs.readFile(statePath, "utf8")) as PublishedPrematchState;
-    if (parsed?.version !== 1) return null;
+    if (parsed?.version !== 2) return null;
     const day = parsed.days?.[date];
     return day && Array.isArray(day.picks) ? day : null;
   } catch (error: any) {
@@ -37,12 +37,12 @@ export async function savePublishedPrematchDay(
     let days: PublishedPrematchState["days"] = {};
     try {
       const current = JSON.parse(await fs.readFile(statePath, "utf8")) as PublishedPrematchState;
-      if (current?.version === 1 && current.days) days = current.days;
+      if (current?.version === 2 && current.days) days = current.days;
     } catch {}
     days[date] = value;
     for (const key of Object.keys(days)) if (key < date) delete days[key];
     const temporary = `${statePath}.tmp`;
-    await fs.writeFile(temporary, JSON.stringify({ version: 1, days }), "utf8");
+    await fs.writeFile(temporary, JSON.stringify({ version: 2, days }), "utf8");
     await fs.rename(temporary, statePath);
   } catch (error: any) {
     console.error("[prematch-state] write failed:", error?.message ?? error);

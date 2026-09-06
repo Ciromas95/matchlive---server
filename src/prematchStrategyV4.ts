@@ -28,12 +28,12 @@ function marketRate(input: StrategyInputV3, market: PrematchMarketV3, recent: bo
   if (market === "OVER 2.5") return (home.over25Rate + away.over25Rate) / 2;
   if (market === "CASA OVER 1.5") return home.scoredOver15Rate ?? null;
   if (market === "OSPITE OVER 1.5") return away.scoredOver15Rate ?? null;
-  if (market === "1X") return recent
-    ? input.homeResultRecent.unbeatenRate
-    : input.homeResultVenue.unbeatenRate;
-  if (market === "X2") return recent
-    ? input.awayResultRecent.unbeatenRate
-    : input.awayResultVenue.unbeatenRate;
+  if (market === "1" || market === "1X") return recent
+    ? (market === "1" ? input.homeResultRecent.winRate : input.homeResultRecent.unbeatenRate)
+    : (market === "1" ? input.homeResultVenue.winRate : input.homeResultVenue.unbeatenRate);
+  if (market === "2" || market === "X2") return recent
+    ? (market === "2" ? input.awayResultRecent.winRate : input.awayResultRecent.unbeatenRate)
+    : (market === "2" ? input.awayResultVenue.winRate : input.awayResultVenue.unbeatenRate);
   return null;
 }
 
@@ -41,7 +41,7 @@ function currentSample(input: StrategyInputV3, market: PrematchMarketV3): number
   if (market.startsWith("CORNER")) {
     return Math.min(input.homeCorners.effectiveMatches, input.awayCorners.effectiveMatches);
   }
-  if (market === "1X" || market === "X2") {
+  if (["1", "2", "1X", "X2"].includes(market)) {
     return Math.min(input.homeResultVenue.effectiveMatches, input.awayResultVenue.effectiveMatches);
   }
   return Math.min(input.homeOverall.effectiveMatches ?? input.homeOverall.matches,
@@ -113,4 +113,3 @@ export function evaluateStrategyV4(input: StrategyInputV3): StrategyEvaluationV4
 }
 
 export type { StrategyInputV3, CoreMarketV3 };
-

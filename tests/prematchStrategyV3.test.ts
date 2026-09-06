@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   extractOddsSnapshotV3,
+  robustReferenceOdd,
   isUpcomingPrematchV3,
   buildWeightedRecentStatsV3,
   mergePublishedPrematchResults,
@@ -72,6 +73,8 @@ function prices(odd = 1.7): Record<CoreMarketV3, MarketPriceV3> {
     "OVER 2.5": price(odd, 0.58),
     "CASA OVER 1.5": price(odd, 0.56),
     "OSPITE OVER 1.5": price(odd, 0.56),
+    "1": price(1.72, 0.57),
+    "2": price(1.72, 0.57),
     "1X": price(1.78, 0.58),
     X2: price(1.78, 0.58),
   };
@@ -142,6 +145,25 @@ test("1X e X2 vengono entrambi estratti dalla doppia chance con probabilità coe
   assert.ok((snapshot.markets.X2.consensusProbability ?? 0) > 0.5);
 });
 
+test("1 e 2 vengono estratti dal mercato 1X2 usando la quota media robusta", () => {
+  const bookmaker = (name: string, home: string, away: string) => ({
+    name,
+    bets: [{ id: 1, values: [
+      { value: "Home", odd: home },
+      { value: "Draw", odd: "3.40" },
+      { value: "Away", odd: away },
+    ] }],
+  });
+  const snapshot = extractOddsSnapshotV3({ response: [{ bookmakers: [
+    bookmaker("A", "1.52", "5.80"),
+    bookmaker("B", "1.50", "5.90"),
+    bookmaker("C", "1.48", "6.00"),
+  ] }] });
+  assert.equal(snapshot.markets["1"].bookmakerCount, 3);
+  assert.equal(snapshot.markets["1"].referenceOdd, 1.5);
+  assert.equal(snapshot.markets["2"].bookmakerCount, 3);
+});
+
 test("la quota gol ospite non può essere contaminata dal mercato fuorigioco ospite", () => {
   const bookmaker = (name: string, correctOdd: string, offsidesOdd: string) => ({
     id: name === "A" ? 1 : 2,
@@ -179,16 +201,22 @@ test("il parser accetta soltanto gli ID esatti dei nove mercati", () => {
 
 test("le soglie minime V3 corrispondono ai mercati approvati", () => {
   assert.deepEqual(MIN_ODDS_V3, {
-    GOAL: 1.5,
-    "OVER 2.5": 1.5,
-    "CASA OVER 1.5": 1.5,
-    "OSPITE OVER 1.5": 1.5,
-    "1X": 1.7,
-    X2: 1.7,
-    "CORNER CASA": 1.6,
-    "CORNER OSPITE": 1.6,
-    "CORNER TOTALI": 1.6,
+    GOAL: 1.47,
+    "OVER 2.5": 1.47,
+    "CASA OVER 1.5": 1.47,
+    "OSPITE OVER 1.5": 1.47,
+    "1": 1.47,
+    "2": 1.47,
+    "1X": 1.47,
+    X2: 1.47,
+    "CORNER CASA": 1.47,
+    "CORNER OSPITE": 1.47,
+    "CORNER TOTALI": 1.47,
   });
+});
+
+test("la quota di riferimento scarta gli estremi anomali", () => {
+  assert.equal(robustReferenceOdd([1.2, 1.48, 1.50, 1.52, 4.8]), 1.5);
 });
 
 test("un profilo tipo Chelsea-Brighton non viene scartato solo per la forma recente", () => {
@@ -228,7 +256,7 @@ test("un profilo tipo Chelsea-Brighton non viene scartato solo per la forma rece
   assert.ok(evaluation.selections.some((selection) => selection.market === "OVER 2.5"));
 });
 
-test("le nuove scansioni aggiungono card senza modificare quelle già pubblicate", () => {
+test("dopo le 10 lo snapshot resta atomico e non aggiunge card tardive", () => {
   const original = {
     fixtureId: 1,
     date: "2099-09-06T15:00:00+02:00",
@@ -249,8 +277,7 @@ test("le nuove scansioni aggiungono card senza modificare quelle già pubblicate
     { picks: [original], candidates: [] },
     { picks: [recalculated, addition], candidates: [] },
   );
-  assert.equal(merged.picks.length, 2);
+  assert.equal(merged.picks.length, 1);
   assert.equal(merged.picks[0].recommendedBet, "GOAL");
   assert.deepEqual(merged.picks[0].odds, { selectedOdd: 1.62 });
-  assert.equal(merged.picks[1].fixtureId, 2);
 });

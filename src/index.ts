@@ -18,6 +18,7 @@ import brainLiveRouter from "./routes/brainLive";
 import * as brainLiveModule from "./brainLive";
 import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
+import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
 
 dotenv.config();
@@ -289,6 +290,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
   ensureUsersDay();
   const stats = getApiStats();
   const cache = cacheSnapshot();
+  const prematchScan = await getLatestPrematchScanReport();
 
   return res.json({
     ...stats,
@@ -302,6 +304,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
       dauToday: usersSeenToday.size,
       sessionsToday: usersSessionsToday,
     },
+    prematchScan,
   });
 });
 

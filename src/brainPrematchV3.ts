@@ -26,9 +26,9 @@ import { evaluateStrategyV4 } from "./prematchStrategyV4";
 import { sendBrainPrematchPush } from "./push";
 import { claimPrematchNotification } from "./prematchNotificationState";
 import { loadPublishedPrematchDay, savePublishedPrematchDay } from "./prematchPublishedState";
+import { PrematchScanReport, savePrematchScanReport } from "./prematchScanReport";
 
 const BASE_URL = "https://v3.football.api-sports.io";
-import { isApiEcoMode } from "./runtimeMode";
 const FINISHED = new Set(["FT", "AET", "PEN"]);
 const NOT_STARTED = new Set(["NS", "TBD"]);
 const CORE_MARKETS: CoreMarketV3[] = [
@@ -36,6 +36,8 @@ const CORE_MARKETS: CoreMarketV3[] = [
   "OVER 2.5",
   "CASA OVER 1.5",
   "OSPITE OVER 1.5",
+  "1",
+  "2",
   "1X",
   "X2",
 ];
@@ -72,7 +74,7 @@ type PrematchPickV3 = {
   fixtureId: number;
   date: string | null;
   contextType: "league" | "cup";
-  algorithmVersion: "brainlive-strategy-v4";
+  algorithmVersion: "brainlive-strategy-v5-complete";
   league: Record<string, unknown>;
   home: Record<string, unknown>;
   away: Record<string, unknown>;
@@ -134,7 +136,7 @@ async function cached<T>(
 function dateFixtures(date: string) {
   return cached(
     `brainPrematchV3:date:${date}`,
-    isApiEcoMode() ? 6 * 3600 : 10 * 60,
+    10 * 60,
     30 * 60,
     () => apiGet("/fixtures", { date, timezone: "Europe/Rome" }),
   );
@@ -143,7 +145,7 @@ function dateFixtures(date: string) {
 function leagueSeasonFixtures(leagueId: number, season: number, previous = false) {
   return cached(
     `brainPrematchV3:league:${leagueId}:${season}`,
-    previous ? 24 * 3600 : isApiEcoMode() ? 6 * 3600 : 30 * 60,
+    previous ? 24 * 3600 : 30 * 60,
     24 * 3600,
     () => apiGet("/fixtures", { league: leagueId, season }),
   );
@@ -152,7 +154,7 @@ function leagueSeasonFixtures(leagueId: number, season: number, previous = false
 function recentTeamFixtures(teamId: number) {
   return cached(
     `brainPrematchV3:recent:${teamId}:12`,
-    isApiEcoMode() ? 6 * 3600 : 60 * 60,
+    60 * 60,
     6 * 3600,
     () => apiGet("/fixtures", { team: teamId, last: 12 }),
   );
@@ -161,7 +163,7 @@ function recentTeamFixtures(teamId: number) {
 function nextTeamFixtures(teamId: number) {
   return cached(
     `brainPrematchV3:next:${teamId}:3`,
-    isApiEcoMode() ? 3 * 3600 : 45 * 60,
+    45 * 60,
     6 * 3600,
     () => apiGet("/fixtures", { team: teamId, next: 3 }),
   );
@@ -186,7 +188,6 @@ function headToHead(homeId: number, awayId: number) {
 }
 
 function oddsTtlSeconds(kickoff: string | null): number {
-  if (isApiEcoMode()) return 30 * 60;
   const kickoffMs = kickoff ? new Date(kickoff).getTime() : Number.NaN;
   const hours = Number.isFinite(kickoffMs) ? (kickoffMs - Date.now()) / 3_600_000 : 48;
   if (hours <= 1) return 120;
@@ -226,6 +227,14 @@ function median(values: number[]): number | null {
     : sorted[middle];
 }
 
+/** Media robusta: elimina gli estremi quando il campione lo consente. */
+export function robustReferenceOdd(values: number[]): number | null {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const central = sorted.length >= 5 ? sorted.slice(1, -1) : sorted;
+  return central.reduce((sum, value) => sum + value, 0) / central.length;
+}
+
 function emptyPrice(line: number | null = null): MarketPriceV3 {
   return {
     bestOdd: null,
@@ -238,9 +247,7 @@ function emptyPrice(line: number | null = null): MarketPriceV3 {
 }
 
 function finalizePrice(rawOffers: MarketOfferV3[], line: number | null = null): MarketPriceV3 {
-  const paired = rawOffers.filter(
-    (offer) => offer.oppositeOdd != null && offer.fairProbability != null,
-  );
+  const paired = rawOffers.filter((offer) => offer.fairProbability != null);
   const probabilityMedian = median(
     paired.map((offer) => offer.fairProbability!).filter(Number.isFinite),
   );
@@ -254,7 +261,7 @@ function finalizePrice(rawOffers: MarketOfferV3[], line: number | null = null): 
   credible.sort((left, right) => right.odd - left.odd);
   return {
     bestOdd: credible[0]?.odd ?? null,
-    referenceOdd: median(credible.map((offer) => offer.odd)),
+    referenceOdd: robustReferenceOdd(credible.map((offer) => offer.odd)),
     consensusProbability: median(credible.map((offer) => offer.fairProbability!)),
     bookmakerCount: credible.length,
     offers: credible.slice(0, 3),
@@ -301,6 +308,8 @@ export function extractOddsSnapshotV3(raw: any): OddsSnapshotV3 {
             if (label === "away") result.away = parsedOdd;
           }
           oneXTwo.set(bookmakerName, result);
+          if (result.home != null) core.get("1")!.set(bookmakerName, { selectionOdd: result.home, bookmakerId });
+          if (result.away != null) core.get("2")!.set(bookmakerName, { selectionOdd: result.away, bookmakerId });
           continue;
         }
         const market = EXACT_MARKET_BY_BET_ID[betId];
@@ -368,17 +377,20 @@ export function extractOddsSnapshotV3(raw: any): OddsSnapshotV3 {
       if (values.selectionOdd == null) continue;
       let oppositeOdd = values.oppositeOdd ?? null;
       let fairProbability: number | null = null;
-      if (market === "1X" || market === "X2") {
+      if (["1", "2", "1X", "X2"].includes(market)) {
         const result = oneXTwo.get(bookmaker);
         if (result?.home && result.draw && result.away) {
           const total = 1 / result.home + 1 / result.draw + 1 / result.away;
           const homeProbability = (1 / result.home) / total;
           const drawProbability = (1 / result.draw) / total;
           const awayProbability = (1 / result.away) / total;
-          fairProbability = market === "1X"
-            ? homeProbability + drawProbability
+          fairProbability = market === "1" ? homeProbability
+            : market === "2" ? awayProbability
+            : market === "1X" ? homeProbability + drawProbability
             : drawProbability + awayProbability;
-          oppositeOdd = market === "1X" ? result.away : result.home;
+          oppositeOdd = market === "1" ? null
+            : market === "2" ? null
+            : market === "1X" ? result.away : result.home;
         }
       } else if (oppositeOdd != null) {
         fairProbability = (1 / values.selectionOdd) /
@@ -743,14 +755,18 @@ function seasonOf(fixture: any): number {
   return year > 2000 ? year : new Date().getUTCFullYear();
 }
 
+export const BRAIN_PREMATCH_LEAGUE_IDS = new Set([
+  218, 144, 119, 4, 2, 3, 848, 1, 5, 61, 78, 39, 135, 137, 547,
+  88, 94, 140, 141, 207, 203,
+]);
+
 function allowed(fixture: any): boolean {
   const id = Number(fixture?.league?.id ?? 0);
-  const ids = new Set([135, 78, 39, 88, 140, 61, 94, 119, 2, 3, 848, 1, 4, 5, 32, 960, 15]);
-  return ids.has(id);
+  return BRAIN_PREMATCH_LEAGUE_IDS.has(id);
 }
 
 function isCup(fixture: any): boolean {
-  return new Set([2, 3, 848, 1, 4, 5, 32, 960, 15]).has(Number(fixture?.league?.id ?? 0));
+  return new Set([2, 3, 848, 1, 4, 5, 137, 547]).has(Number(fixture?.league?.id ?? 0));
 }
 
 function round(value: number, digits = 2): number {
@@ -760,6 +776,16 @@ function round(value: number, digits = 2): number {
 function insight(pick: PrematchPickV3): string {
   const a: any = pick.analysis;
   const s: any = a.stats;
+  if (String(pick.recommendedBet).startsWith("CORNER")) {
+    const home = a.corners?.home;
+    const away = a.corners?.away;
+    return [
+      `${String(pick.home.name)}: ${round(Number(home?.averageFor ?? 0))} corner battuti / ${round(Number(home?.averageAgainst ?? 0))} concessi`,
+      `${String(pick.away.name)}: ${round(Number(away?.averageFor ?? 0))} corner battuti / ${round(Number(away?.averageAgainst ?? 0))} concessi`,
+      `campione ${Number(home?.matches ?? 0)} + ${Number(away?.matches ?? 0)} incontri`,
+      `linea ${String(pick.recommendedBet)}`,
+    ].join(" | ");
+  }
   const lines = [
     `${String(pick.home.name)} totale ${s.homeOverall.matches}: ${round(s.homeOverall.avgGoalsFor)} fatti / ${round(s.homeOverall.avgGoalsAgainst)} subiti`,
     `${String(pick.away.name)} totale ${s.awayOverall.matches}: ${round(s.awayOverall.avgGoalsFor)} fatti / ${round(s.awayOverall.avgGoalsAgainst)} subiti`,
@@ -823,7 +849,9 @@ function oddsPayload(snapshot: OddsSnapshotV3, selected: PrematchMarketV3, line:
     awayOver15Offers: away.offers,
     selectedMarket: selected,
     selectedLine: line,
-    selectedOdd: selectedMarketPrice.bestOdd,
+    selectedOdd: selectedMarketPrice.referenceOdd ?? selectedMarketPrice.bestOdd,
+    selectedBestOdd: selectedMarketPrice.bestOdd,
+    selectedReferenceOdd: selectedMarketPrice.referenceOdd,
     selectedOffers: selectedMarketPrice.offers,
     marketOdds,
     marketOffers,
@@ -962,11 +990,13 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
   const oddsSnapshot = extractOddsSnapshotV3(oddsRaw);
   const hasCorePrices = CORE_MARKETS.some((market) => {
     const price = oddsSnapshot.markets[market];
-    return price.bestOdd != null && price.bestOdd >= MIN_ODDS_V3[market] && price.bookmakerCount >= 2;
+    const reference = price.referenceOdd ?? price.bestOdd;
+    return reference != null && reference >= MIN_ODDS_V3[market] && price.bookmakerCount >= 2;
   });
   const hasCornerPrices = allowCorners && CORNER_MARKETS.some((market) =>
     oddsSnapshot.cornerMarkets[market].some((price) =>
-      price.bestOdd != null && price.bestOdd >= MIN_ODDS_V3[market]
+      (price.referenceOdd ?? price.bestOdd) != null &&
+      (price.referenceOdd ?? price.bestOdd)! >= MIN_ODDS_V3[market]
     ),
   );
   if (!hasCorePrices && !hasCornerPrices) return null;
@@ -1047,7 +1077,8 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
   if (!evaluated.selection) return null;
   const selected = evaluated.selection;
   const marketPrice = selectedPrice(oddsSnapshot, selected.market, selected.line);
-  if (selected.bestOdd < MIN_ODDS_V3[selected.market] || marketPrice.offers.length < 2) {
+  const selectedReferenceOdd = marketPrice.referenceOdd ?? marketPrice.bestOdd;
+  if (selectedReferenceOdd == null || selectedReferenceOdd < MIN_ODDS_V3[selected.market] || marketPrice.offers.length < 2) {
     return null;
   }
 
@@ -1082,6 +1113,7 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
       finalProbability: round(selected.finalProbability),
       fairOdd: round(selected.fairOdd),
       bestOdd: round(selected.bestOdd),
+      referenceOdd: round(selectedReferenceOdd),
       expectedValue: round(selected.expectedValue),
       dataQuality: round(selected.dataQuality),
       robustProbability: round(selected.robustProbability),
@@ -1122,7 +1154,7 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
     fixtureId,
     date: fixture?.fixture?.date ?? null,
     contextType: baseInput.contextType,
-    algorithmVersion: "brainlive-strategy-v4",
+    algorithmVersion: "brainlive-strategy-v5-complete",
     league: {
       id: leagueId,
       name: fixture?.league?.name ?? null,
@@ -1136,9 +1168,10 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
     confidence: round(selected.finalProbability),
     score: round(selected.score, 1),
     insightLine: "",
-    reason:
-      `Il modello stima ${round(evaluated.lambdaHome)} gol per la squadra di casa e ` +
-      `${round(evaluated.lambdaAway)} per l'ospite, con qualità dati ${Math.round(evaluated.dataQuality * 100)}%.`,
+    reason: String(selected.market).startsWith("CORNER")
+      ? `Il modello confronta corner battuti, corner concessi, variabilità e consistenza del campione sulla linea ${selected.line?.toFixed(1)}.`
+      : `Il modello stima ${round(evaluated.lambdaHome)} gol per la squadra di casa e ` +
+        `${round(evaluated.lambdaAway)} per l'ospite, con qualità dati ${Math.round(evaluated.dataQuality * 100)}%.`,
     odds: oddsPayload(oddsSnapshot, selected.market, selected.line),
     analysis,
   };
@@ -1189,24 +1222,21 @@ const publishedDailyResults = new Map<
   string,
   { picks: PrematchPickV3[]; candidates: never[] }
 >();
+const preparedDailyResults = new Map<
+  string,
+  { picks: PrematchPickV3[]; candidates: never[] }
+>();
 
 /**
- * Le analisi già pubblicate sono immutabili fino al calcio d'inizio. Una
- * scansione successiva può solamente aggiungere nuovi incontri diventati
- * valutabili quando il fornitore completa quote o statistiche.
+ * Dopo la pubblicazione lo snapshot resta immutabile: quote e risposte
+ * temporaneamente incomplete non possono far sparire o aggiungere card.
  */
 export function mergePublishedPrematchResults(
   published: { picks: PrematchPickV3[]; candidates: never[] } | null,
   scanned: { picks: PrematchPickV3[]; candidates: never[] },
 ) {
-  const existing = visiblePicks(published?.picks ?? []);
-  const existingIds = new Set(existing.map((pick) => pick.fixtureId));
-  const additions = visiblePicks(scanned.picks)
-    .filter((pick) => !existingIds.has(pick.fixtureId));
-  return {
-    picks: [...existing, ...additions],
-    candidates: [] as never[],
-  };
+  if (published) return { picks: visiblePicks(published.picks), candidates: [] as never[] };
+  return { picks: visiblePicks(scanned.picks), candidates: [] as never[] };
 }
 
 export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promise<{
@@ -1214,7 +1244,7 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
   candidates: never[];
   cacheState: "fresh" | "stale" | "miss";
 }> {
-  const max = Math.max(1, Math.min(maxMatches, 48));
+  const max = Math.max(1, Math.min(maxMatches, 250));
   if (!isPrematchPublicationOpenV3(date)) {
     return {
       picks: [],
@@ -1225,48 +1255,43 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
   let published = publishedDailyResults.get(date) ?? null;
   if (!published) {
     published = await loadPublishedPrematchDay(date);
-    if (published) publishedDailyResults.set(date, published);
+    if (published?.picks?.length) publishedDailyResults.set(date, published);
+    else published = null;
   }
-  // Un solo risultato di scansione condiviso: maxMatches limita la risposta,
-  // non genera calcoli diversi per ciascun dispositivo.
-  const key = `brainPrematchV3:result:${date}:48:v4-robust-4`;
-  const state = getCacheState<{ picks: PrematchPickV3[]; candidates: never[] }>(key);
-  if (state.state === "fresh" && state.value) {
-    const merged = mergePublishedPrematchResults(published, state.value);
-    publishedDailyResults.set(date, merged);
-    void savePublishedPrematchDay(date, merged);
-    return { ...merged, picks: merged.picks.slice(0, max), cacheState: "fresh" };
+  if (published) {
+    const stable = mergePublishedPrematchResults(published, published);
+    return { ...stable, picks: stable.picks.slice(0, max), cacheState: "fresh" };
   }
-  // Uno stato stale non diventa una sentenza definitiva: forza la scansione
-  // successiva, continuando poi a conservare ogni card già pubblicata.
-  const fresh = await runOnce(key, () => compute(date, 48, key));
-  const merged = mergePublishedPrematchResults(published, fresh);
-  publishedDailyResults.set(date, merged);
-  await savePublishedPrematchDay(date, merged);
-  return { ...merged, picks: merged.picks.slice(0, max), cacheState: state.state === "stale" ? "stale" : "miss" };
+  // Alle 10 viene pubblicato in un unico gesto il dossier già preparato.
+  // Se il server è stato riavviato, la scansione viene completata una sola volta.
+  const key = `brainPrematchV3:result:${date}:v5-complete`;
+  const prepared = preparedDailyResults.get(date) ?? await runOnce(key, () => compute(date, key, "pubblicato"));
+  const snapshot = mergePublishedPrematchResults(null, prepared);
+  publishedDailyResults.set(date, snapshot);
+  await savePublishedPrematchDay(date, snapshot);
+  return { ...snapshot, picks: snapshot.picks.slice(0, max), cacheState: "miss" };
 }
 
-async function compute(date: string, max: number, key: string) {
+async function compute(date: string, key: string, phase: "preparazione" | "pubblicato") {
+  const startedAt = new Date().toISOString();
   const raw = await dateFixtures(date);
   const fixtures = responseFixtures(raw);
-  const upcoming = fixtures
+  const supported = fixtures.filter(allowed);
+  const upcoming = supported
     .filter((fixture) => NOT_STARTED.has(String(fixture?.fixture?.status?.short ?? "").toUpperCase()))
     .filter((fixture) => fixtureDate(fixture) > Date.now())
-    .filter(allowed)
-    .sort((a, b) => fixtureDate(a) - fixtureDate(b))
-    .slice(0, isApiEcoMode() ? 18 : 48);
+    .sort((a, b) => fixtureDate(a) - fixtureDate(b));
   const picks: PrematchPickV3[] = [];
-  const cornerScanLimit = isApiEcoMode() ? 2 : 16;
   let rejected = 0;
   let failed = 0;
   const failureSamples: string[] = [];
 
   // Piccoli gruppi evitano picchi di chiamate e mantengono il server reattivo.
-  for (let index = 0; index < upcoming.length; index += 4) {
-    const batch = upcoming.slice(index, index + 4);
-    const evaluated = await Promise.all(batch.map(async (fixture, batchIndex) => {
+  for (let index = 0; index < upcoming.length; index += 6) {
+    const batch = upcoming.slice(index, index + 6);
+    const evaluated = await Promise.all(batch.map(async (fixture) => {
       try {
-        const pick = await evaluateFixture(fixture, index + batchIndex < cornerScanLimit);
+        const pick = await evaluateFixture(fixture, true);
         if (!pick) rejected += 1;
         return pick;
       } catch (error: any) {
@@ -1285,7 +1310,7 @@ async function compute(date: string, max: number, key: string) {
   // Nessun tetto artificiale per campionato: se più incontri superano tutti
   // i controlli matematici vengono pubblicati. Rimane soltanto il limite
   // tecnico richiesto dal client, sufficientemente alto per proteggere l'API.
-  const finalPicks = picks.slice(0, max);
+  const finalPicks = picks;
 
   const result = { picks: finalPicks, candidates: [] as never[] };
   console.info("[prematch-v4] scan completed", {
@@ -1295,7 +1320,7 @@ async function compute(date: string, max: number, key: string) {
     accepted: finalPicks.length,
     rejected,
     failed,
-    ecoMode: isApiEcoMode(),
+    algorithmMode: "complete",
     failureSamples,
   });
   // Una scelta pubblicata non deve sparire perché un refresh successivo ha
@@ -1303,7 +1328,28 @@ async function compute(date: string, max: number, key: string) {
   // d'inizio; `visiblePicks` la rimuove esattamente in quel momento.
   // L'intero risultato viene pubblicato come un solo snapshot giornaliero;
   // `visiblePicks` continua comunque a rimuovere ogni gara al calcio d'inizio.
-  setCache(key, result, isApiEcoMode() ? 30 * 60 : 5 * 60, 30 * 60);
+  const report: PrematchScanReport = {
+    algorithmVersion: "brainlive-strategy-v5-complete",
+    date,
+    phase,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    publishedAt: phase === "pubblicato" ? new Date().toISOString() : null,
+    providerFixtures: fixtures.length,
+    supportedFixtures: supported.length,
+    upcomingFixtures: upcoming.length,
+    evaluatedFixtures: upcoming.length,
+    acceptedFixtures: finalPicks.length,
+    excluded: {
+      fuoriCompetizioniSelezionate: fixtures.length - supported.length,
+      nonFutureONonProgrammate: supported.length - upcoming.length,
+      quotaODatiNonSufficienti: rejected,
+      erroreFornitore: failed,
+    },
+    failures: failureSamples,
+  };
+  await savePrematchScanReport(report);
+  setCache(key, result, 30 * 60, 60 * 60);
   return result;
 }
 
@@ -1315,16 +1361,25 @@ export function startBrainPrematchSchedulerV3(): void {
   let lastScanSlot = "";
   const tick = () => {
     const clock = italianClock();
-    // Finestra di assestamento limitata: recupera quote/dati arrivati tardi
-    // senza trasformare il Prematch in un polling costoso per tutta la giornata.
-    if (clock.hour < 10 || clock.hour >= 12) return;
-    const intervalMinutes = isApiEcoMode() ? 30 : 15;
+    // Tre preparazioni prima delle 10 consentono di recuperare risposte
+    // temporanee del fornitore; alle 10 lo snapshot viene pubblicato tutto insieme.
+    const preparing = clock.hour === 8 || clock.hour === 9;
+    const publishing = clock.hour === 10;
+    if (!preparing && !publishing) return;
+    const intervalMinutes = preparing ? 30 : 60;
     const slot = `${clock.date}:${clock.hour}:${Math.floor(clock.minute / intervalMinutes)}`;
     if (lastScanSlot === slot) return;
     lastScanSlot = slot;
-    void buildBrainPrematchV3(clock.date, 48)
+    const job = publishing
+      ? buildBrainPrematchV3(clock.date, 250)
+      : runOnce(`brainPrematchV3:prepare:${slot}`, async () => {
+          const prepared = await compute(clock.date, `brainPrematchV3:prepared:${slot}`, "preparazione");
+          preparedDailyResults.set(clock.date, prepared);
+          return { ...prepared, cacheState: "miss" as const };
+        });
+    void job
       .then(async (result) => {
-        if (result.picks.length > 0 && await claimPrematchNotification(clock.date)) {
+        if (publishing && result.picks.length > 0 && await claimPrematchNotification(clock.date)) {
           await sendBrainPrematchPush(result.picks.length);
         }
       })

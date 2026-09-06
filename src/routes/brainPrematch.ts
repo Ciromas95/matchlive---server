@@ -26,8 +26,8 @@ brainPrematchRouter.get("/prematch", async (req: Request, res: Response) => {
     }
 
     const date = String(req.query.date ?? "").trim();
-    const maxMatchesParam = Number(req.query.maxMatches ?? 48);
-    const maxMatches = Math.max(1, Math.min(maxMatchesParam || 48, 48));
+    const maxMatchesParam = Number(req.query.maxMatches ?? 250);
+    const maxMatches = Math.max(1, Math.min(maxMatchesParam || 250, 250));
 
     if (!date) {
       return res.status(400).json({ error: "Missing date" });

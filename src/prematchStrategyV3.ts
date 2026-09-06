@@ -11,6 +11,8 @@ export type PrematchMarketV3 =
   | "OVER 2.5"
   | "CASA OVER 1.5"
   | "OSPITE OVER 1.5"
+  | "1"
+  | "2"
   | "1X"
   | "X2"
   | "CORNER CASA"
@@ -121,15 +123,17 @@ export type StrategyEvaluationV3 = {
 };
 
 export const MIN_ODDS_V3: Record<PrematchMarketV3, number> = {
-  GOAL: 1.5,
-  "OVER 2.5": 1.5,
-  "CASA OVER 1.5": 1.5,
-  "OSPITE OVER 1.5": 1.5,
-  "1X": 1.7,
-  X2: 1.7,
-  "CORNER CASA": 1.6,
-  "CORNER OSPITE": 1.6,
-  "CORNER TOTALI": 1.6,
+  GOAL: 1.47,
+  "OVER 2.5": 1.47,
+  "CASA OVER 1.5": 1.47,
+  "OSPITE OVER 1.5": 1.47,
+  "1": 1.47,
+  "2": 1.47,
+  "1X": 1.47,
+  X2: 1.47,
+  "CORNER CASA": 1.47,
+  "CORNER OSPITE": 1.47,
+  "CORNER TOTALI": 1.47,
 };
 
 export function emptyResultProfileV3(): ResultProfileV3 {
@@ -255,37 +259,37 @@ function goalEvidenceProbability(
 }
 
 function resultEvidenceProbability(
-  market: "1X" | "X2",
+  market: "1" | "2" | "1X" | "X2",
   poissonProbability: number,
   input: StrategyInputV3,
 ): number {
-  const isHomeProtection = market === "1X";
-  const venue = isHomeProtection
-    ? input.homeResultVenue.unbeatenRate
-    : 1 - input.awayResultVenue.lossRate;
-  const recent = isHomeProtection
-    ? input.homeResultRecent.unbeatenRate
-    : input.awayResultRecent.unbeatenRate;
-  const opponentFailure = isHomeProtection
-    ? 1 - input.awayResultVenue.winRate
-    : 1 - input.homeResultVenue.winRate;
+  const homeSide = market === "1" || market === "1X";
+  const protectedResult = market === "1X" || market === "X2";
+  const sideVenue = homeSide ? input.homeResultVenue : input.awayResultVenue;
+  const sideRecent = homeSide ? input.homeResultRecent : input.awayResultRecent;
+  const opponentVenue = homeSide ? input.awayResultVenue : input.homeResultVenue;
+  const venue = protectedResult ? sideVenue.unbeatenRate : sideVenue.winRate;
+  const recent = protectedResult ? sideRecent.unbeatenRate : sideRecent.winRate;
+  const opponentFailure = protectedResult
+    ? 1 - opponentVenue.winRate
+    : opponentVenue.lossRate;
   let result = weightedRate([
     [poissonProbability, 0.64],
     [venue, 0.17],
     [recent, 0.11],
     [opponentFailure, 0.08],
   ]);
-  const protectedProfile = isHomeProtection ? input.homeResultVenue : input.awayResultVenue;
-  const opponentProfile = isHomeProtection ? input.awayResultVenue : input.homeResultVenue;
+  const protectedProfile = sideVenue;
+  const opponentProfile = opponentVenue;
   if (protectedProfile.effectiveMatches >= 5 && opponentProfile.effectiveMatches >= 5) {
     result += clamp((protectedProfile.pointsPerMatch - opponentProfile.pointsPerMatch) * 0.012, -0.018, 0.018);
     result += clamp((protectedProfile.goalDifferencePerMatch - opponentProfile.goalDifferencePerMatch) * 0.006, -0.012, 0.012);
   }
 
-  const relevantRest = isHomeProtection
+  const relevantRest = homeSide
     ? input.schedule.awayNextRestDays
     : input.schedule.homeNextRestDays;
-  const opponentCup = isHomeProtection
+  const opponentCup = homeSide
     ? input.schedule.awayHasPriorityCupNext
     : input.schedule.homeHasPriorityCupNext;
   if (opponentCup && relevantRest != null && relevantRest <= 4) result += 0.012;
@@ -297,7 +301,7 @@ function resultEvidenceProbability(
 }
 
 function primaryDataQuality(baseQuality: number, market: PrematchMarketV3, input: StrategyInputV3) {
-  if (market === "1X" || market === "X2") {
+  if (["1", "2", "1X", "X2"].includes(market)) {
     const resultSample = Math.min(
       input.homeResultVenue.effectiveMatches,
       input.awayResultVenue.effectiveMatches,
@@ -320,6 +324,7 @@ function robustFinalProbability(
 function coreThreshold(market: CoreMarketV3): number {
   if (market === "GOAL") return 0.575;
   if (market === "OVER 2.5") return 0.58;
+  if (market === "1" || market === "2") return 0.49;
   if (market === "1X" || market === "X2") return 0.55;
   return 0.535;
 }
@@ -331,9 +336,11 @@ function addCoreSelection(
   price: MarketPriceV3,
   quality: number,
 ) {
-  if (price.bestOdd == null || price.bestOdd < MIN_ODDS_V3[market]) return;
+  const referenceOdd = price.referenceOdd ?? price.bestOdd;
+  if (referenceOdd == null || referenceOdd < MIN_ODDS_V3[market]) return;
   if (price.bookmakerCount < 2 || price.consensusProbability == null) return;
-  if (quality < (market === "1X" || market === "X2" ? 0.7 : 0.5)) return;
+  const resultMarket = ["1", "2", "1X", "X2"].includes(market);
+  if (quality < (resultMarket ? 0.72 : 0.5)) return;
   if (probability < coreThreshold(market)) return;
   if (Math.abs(probability - price.consensusProbability) > 0.16) return;
   const finalProbability = robustFinalProbability(
@@ -341,10 +348,10 @@ function addCoreSelection(
     price.consensusProbability,
     quality,
   );
-  const uncertainty = (1 - quality) * (market === "1X" || market === "X2" ? 0.09 : 0.065);
+  const uncertainty = (1 - quality) * (resultMarket ? 0.09 : 0.065);
   const stableProbability = finalProbability - uncertainty;
-  const expectedValue = finalProbability * price.bestOdd - 1;
-  const minimumEdge = market === "1X" || market === "X2" ? 0.035 : 0.015;
+  const expectedValue = finalProbability * referenceOdd - 1;
+  const minimumEdge = resultMarket ? 0.035 : 0.015;
   if (stableProbability < coreThreshold(market) - 0.03) return;
   if (expectedValue < minimumEdge) return;
   selections.push({
@@ -355,7 +362,7 @@ function addCoreSelection(
     marketProbability: price.consensusProbability,
     finalProbability,
     fairOdd: 1 / finalProbability,
-    bestOdd: price.bestOdd,
+    bestOdd: referenceOdd,
     expectedValue,
     dataQuality: quality,
     score: clamp(finalProbability * 72 + quality * 18 + expectedValue * 100 * 0.1, 0, 100),
@@ -415,15 +422,16 @@ function addCornerSelections(
   const quality = clamp(projection.sample / 10, 0, 1);
   if (quality < 0.78) return;
   for (const price of prices) {
-    if (price.line == null || price.bestOdd == null) continue;
-    if (price.bestOdd < MIN_ODDS_V3[market]) continue;
+    const referenceOdd = price.referenceOdd ?? price.bestOdd;
+    if (price.line == null || referenceOdd == null) continue;
+    if (referenceOdd < MIN_ODDS_V3[market]) continue;
     if (price.bookmakerCount < 2 || price.consensusProbability == null) continue;
     const modelProbability = probabilityOverLine(projection.mean, projection.variance, price.line);
     if (modelProbability < 0.62) continue;
     if (Math.abs(modelProbability - price.consensusProbability) > 0.14) continue;
     const finalProbability = robustFinalProbability(modelProbability, price.consensusProbability, quality);
     const stableProbability = finalProbability - (1 - quality) * 0.09;
-    const expectedValue = finalProbability * price.bestOdd - 1;
+    const expectedValue = finalProbability * referenceOdd - 1;
     if (stableProbability < 0.58 || expectedValue < 0.04) continue;
     selections.push({
       market,
@@ -433,7 +441,7 @@ function addCornerSelections(
       marketProbability: price.consensusProbability,
       finalProbability,
       fairOdd: 1 / finalProbability,
-      bestOdd: price.bestOdd,
+      bestOdd: referenceOdd,
       expectedValue,
       dataQuality: quality,
       score: clamp(finalProbability * 70 + quality * 20 + expectedValue * 10, 0, 100),
@@ -458,6 +466,8 @@ export function evaluateStrategyV3(input: StrategyInputV3): StrategyEvaluationV3
     "OVER 2.5": goalEvidenceProbability("OVER 2.5", base.probabilities["OVER 2.5"], input),
     "CASA OVER 1.5": goalEvidenceProbability("CASA OVER 1.5", base.probabilities["CASA OVER 1.5"], input),
     "OSPITE OVER 1.5": goalEvidenceProbability("OSPITE OVER 1.5", base.probabilities["OSPITE OVER 1.5"], input),
+    "1": resultEvidenceProbability("1", resultProbabilities.home, input),
+    "2": resultEvidenceProbability("2", resultProbabilities.away, input),
     "1X": resultEvidenceProbability("1X", resultProbabilities.home + resultProbabilities.draw, input),
     X2: resultEvidenceProbability("X2", resultProbabilities.away + resultProbabilities.draw, input),
   };
