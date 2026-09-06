@@ -1229,7 +1229,7 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
   }
   // Un solo risultato di scansione condiviso: maxMatches limita la risposta,
   // non genera calcoli diversi per ciascun dispositivo.
-  const key = `brainPrematchV3:result:${date}:48:v4-robust-3`;
+  const key = `brainPrematchV3:result:${date}:48:v4-robust-4`;
   const state = getCacheState<{ picks: PrematchPickV3[]; candidates: never[] }>(key);
   if (state.state === "fresh" && state.value) {
     const merged = mergePublishedPrematchResults(published, state.value);
@@ -1248,7 +1248,8 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
 
 async function compute(date: string, max: number, key: string) {
   const raw = await dateFixtures(date);
-  const upcoming = responseFixtures(raw)
+  const fixtures = responseFixtures(raw);
+  const upcoming = fixtures
     .filter((fixture) => NOT_STARTED.has(String(fixture?.fixture?.status?.short ?? "").toUpperCase()))
     .filter((fixture) => fixtureDate(fixture) > Date.now())
     .filter(allowed)
@@ -1256,13 +1257,27 @@ async function compute(date: string, max: number, key: string) {
     .slice(0, isApiEcoMode() ? 18 : 48);
   const picks: PrematchPickV3[] = [];
   const cornerScanLimit = isApiEcoMode() ? 2 : 16;
+  let rejected = 0;
+  let failed = 0;
+  const failureSamples: string[] = [];
 
   // Piccoli gruppi evitano picchi di chiamate e mantengono il server reattivo.
   for (let index = 0; index < upcoming.length; index += 4) {
     const batch = upcoming.slice(index, index + 4);
-    const evaluated = await Promise.all(batch.map((fixture, batchIndex) =>
-      evaluateFixture(fixture, index + batchIndex < cornerScanLimit).catch(() => null)
-    ));
+    const evaluated = await Promise.all(batch.map(async (fixture, batchIndex) => {
+      try {
+        const pick = await evaluateFixture(fixture, index + batchIndex < cornerScanLimit);
+        if (!pick) rejected += 1;
+        return pick;
+      } catch (error: any) {
+        failed += 1;
+        if (failureSamples.length < 3) {
+          const fixtureId = Number(fixture?.fixture?.id ?? 0);
+          failureSamples.push(`${fixtureId}: ${String(error?.message ?? error).slice(0, 160)}`);
+        }
+        return null;
+      }
+    }));
     picks.push(...evaluated.filter((pick): pick is PrematchPickV3 => pick != null));
   }
   picks.sort((a, b) => b.score - a.score);
@@ -1273,6 +1288,16 @@ async function compute(date: string, max: number, key: string) {
   const finalPicks = picks.slice(0, max);
 
   const result = { picks: finalPicks, candidates: [] as never[] };
+  console.info("[prematch-v4] scan completed", {
+    date,
+    fixtures: fixtures.length,
+    upcoming: upcoming.length,
+    accepted: finalPicks.length,
+    rejected,
+    failed,
+    ecoMode: isApiEcoMode(),
+    failureSamples,
+  });
   // Una scelta pubblicata non deve sparire perché un refresh successivo ha
   // dati/quote momentaneamente incompleti. Resta stabile fino al calcio
   // d'inizio; `visiblePicks` la rimuove esattamente in quel momento.
