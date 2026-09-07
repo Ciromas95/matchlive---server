@@ -11,6 +11,7 @@ import { getTopLiveFixtures, getLiveFixtureStatisticsCached } from "./apiFootbal
 import { evaluateLiveV4, LiveObservationV4, parseLiveStatsV4 } from "./liveStrategyV4";
 import { sendBrainLivePush } from "./push";
 import { loadBrainLiveState, saveBrainLiveState } from "./brainLiveState";
+import { getLiveRawFixtures, hasLiveState } from "./liveState";
 
 type BrainLiveCandidate = {
   fixtureId: number;
@@ -58,6 +59,7 @@ const activeSignalScore = new Map<number, { home: number; away: number }>();
 const activeSignals = new Map<number, any>();
 const cooldownUntilMinute = new Map<number, number>();
 const weakSignalObservations = new Map<number, number>();
+const liveStatsSamples = new Map<number, { fetchedAt: number; raw: any }>();
 let stateHydration: Promise<void> | null = null;
 
 function hydratePersistentState() {
@@ -154,9 +156,9 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
 const finalResultTtlSec = () => 8;
 const precomputedCacheTtlSec = () => 10;
 
-const POLL_MS_NO_TOP_LIVE = 30_000;
-const POLL_MS_FEW_TOP_LIVE = 10_000;
-const POLL_MS_MANY_TOP_LIVE = 10_000;
+const POLL_MS_NO_TOP_LIVE = 20_000;
+const POLL_MS_FEW_TOP_LIVE = 5_000;
+const POLL_MS_MANY_TOP_LIVE = 5_000;
 
 function logDebug(...args: any[]) {
   if (DEBUG_BRAIN_LIVE) {
@@ -376,8 +378,34 @@ function getBrainLiveFromCache(maxResults: number): BrainLiveResult | null {
 }
 
 async function loadSharedLiveFixtures(): Promise<any[]> {
+  const shared = getLiveRawFixtures();
+  if (hasLiveState()) return shared;
   const raw = await getTopLiveFixtures("brainLive");
   return Array.isArray(raw?.response) ? raw.response : [];
+}
+
+function statisticsCadenceMs(candidate: BrainLiveCandidate): number {
+  if (activeSignals.has(candidate.fixtureId)) return 6_000;
+  if (candidate.lightScore >= 5) return 10_000;
+  if (candidate.lightScore >= 3) return 16_000;
+  return 25_000;
+}
+
+async function loadAdaptiveStatistics(candidate: BrainLiveCandidate): Promise<any> {
+  const cadenceMs = statisticsCadenceMs(candidate);
+  const previous = liveStatsSamples.get(candidate.fixtureId);
+  if (previous && Date.now() - previous.fetchedAt < cadenceMs) return previous.raw;
+
+  try {
+    const raw = await getLiveFixtureStatisticsCached(
+      candidate.fixtureId,
+      Math.max(4, Math.ceil(cadenceMs / 1000)),
+    );
+    liveStatsSamples.set(candidate.fixtureId, { fetchedAt: Date.now(), raw });
+    return raw;
+  } catch {
+    return previous?.raw ?? null;
+  }
 }
 
 async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOutput> {
@@ -440,7 +468,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
     const batch = await Promise.all(preliminary.slice(index, index + 3).map(async (candidate) => {
       const cooldown = cooldownUntilMinute.get(candidate.fixtureId) ?? 0;
       if ((candidate.elapsed ?? 0) < cooldown) return null;
-      const rawStats = await getLiveFixtureStatisticsCached(candidate.fixtureId).catch(() => null);
+      const rawStats = await loadAdaptiveStatistics(candidate);
       const statistics = parseLiveStatsV4(rawStats, candidate.home.id ?? 0, candidate.away.id ?? 0);
       if (!statistics || candidate.elapsed == null) return null;
       const fullObservation: LiveObservationV4 = {
@@ -523,6 +551,9 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
     evaluated.push(...batch.filter(Boolean));
   }
   const liveFixtureById = new Map(fixtures.map((fixture) => [Number(fixture?.fixture?.id ?? 0), fixture]));
+  for (const fixtureId of liveStatsSamples.keys()) {
+    if (!liveFixtureById.has(fixtureId)) liveStatsSamples.delete(fixtureId);
+  }
   for (const [fixtureId, signal] of [...activeSignals.entries()]) {
     if (evaluated.some((candidate) => candidate.fixtureId === fixtureId)) continue;
     const fixture = liveFixtureById.get(fixtureId);

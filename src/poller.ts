@@ -1,8 +1,9 @@
 import { getFixtureById, getLiveFixtures } from "./apiFootball";
-import { broadcast, clientsCount } from "./stream";
+import { broadcast } from "./stream";
 import { liveTtlMs } from "./ttl";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
-import { pushEnabled, sendFixturePush } from "./push";
+import { sendFixturePush } from "./push";
+import { publishLiveState } from "./liveState";
 
 const lastScore = new Map<number, string>();
 
@@ -161,12 +162,6 @@ export function startPoller() {
 
   const run = async () => {
     try {
-      // Se non c’è nessun client SSE, rallenta molto (risparmi API)
-      if (clientsCount() === 0 && !pushEnabled()) {
-        scheduleNext(30000);
-        return;
-      }
-
       const data = await getLiveFixtures("live", true);
       const fixtures = Array.isArray(data?.response) ? data.response : [];
       const liveCount = fixtures.length;
@@ -238,10 +233,13 @@ export function startPoller() {
       pruneSeenEvents(6 * 60 * 60 * 1000); // 6 ore
       pruneLastScore(liveIds);
       pruneRedCardsLive(liveIds); // ✅
+      // Pubblica una sola fotografia coerente dopo aver aggiornato anche la
+      // cache dei cartellini. Tutte le schermate ricevono lo stesso delta.
+      await publishLiveState(data);
       await checkFinishedFixtures(liveIds);
 
       // Poll dinamico coerente con la cache TTL live (ms)
-      const nextMs = Math.max(8_000, liveTtlMs(liveCount));
+      const nextMs = Math.max(4_000, liveTtlMs(liveCount));
       scheduleNext(nextMs);
     } catch (e: any) {
       console.error("poller error:", e?.message || e);

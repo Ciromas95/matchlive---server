@@ -5,7 +5,7 @@ import cors from "cors";
 import * as apiFootball from "./apiFootball";
 import { flagUrlFromCountryName } from "./flags";
 import { toLiveCompact } from "./compact";
-import { addClient, removeClient } from "./stream";
+import { addClient, clientsCount, removeClient } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
 import { refreshProviderQuota } from "./providerQuotaSync";
@@ -20,6 +20,7 @@ import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
 import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
+import { getLiveStateSnapshot, hasLiveState } from "./liveState";
 
 dotenv.config();
 
@@ -292,6 +293,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
   const stats = getApiStats();
   const cache = cacheSnapshot();
   const prematchScan = await getLatestPrematchScanReport();
+  const liveSnapshot = getLiveStateSnapshot();
 
   return res.json({
     ...stats,
@@ -299,6 +301,15 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
     serverMemory: cache,
     workInProgress: {
       externalUpdatesRunning: inflightSize(),
+    },
+    livePipeline: {
+      revision: liveSnapshot.revision,
+      fixtures: liveSnapshot.fixtures.length,
+      connectedDevices: clientsCount(),
+      updatedAt: liveSnapshot.updatedAt,
+      ageMs: liveSnapshot.updatedAt
+        ? Math.max(0, Date.now() - Date.parse(liveSnapshot.updatedAt))
+        : null,
     },
     users: {
       onlineNow: computeOnlineNow(),
@@ -330,7 +341,16 @@ app.get("/api/live", async (_req: Request, res: Response) => {
 
 app.get("/api/live/compact", async (_req: Request, res: Response) => {
   try {
-    setSharedCache(res, 5);
+    setSharedCache(res, 2);
+    if (hasLiveState()) {
+      const snapshot = getLiveStateSnapshot();
+      return res.json({
+        updatedAt: snapshot.updatedAt,
+        revision: snapshot.revision,
+        results: snapshot.fixtures.length,
+        fixtures: snapshot.fixtures,
+      });
+    }
     const data = await apiFootball.getLiveFixtures("compact");
     const fixtures = await toLiveCompact(data);
 
@@ -478,6 +498,15 @@ app.get("/api/stream", (req: Request, res: Response) => {
   res.flushHeaders();
 
   res.write(`data: ${JSON.stringify({ type: "hello" })}\n\n`);
+  if (types.length === 0 || types.includes("live_snapshot") || types.includes("live_delta")) {
+    const snapshot = getLiveStateSnapshot();
+    res.write(`data: ${JSON.stringify({
+      type: "live_snapshot",
+      revision: snapshot.revision,
+      updatedAt: snapshot.updatedAt,
+      fixtures: snapshot.fixtures,
+    })}\n\n`);
+  }
 
   const heartbeat = setInterval(() => {
     try {

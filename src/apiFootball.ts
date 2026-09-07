@@ -283,7 +283,7 @@ export async function getLiveFixtures(
     const refresh = runOnce(cacheKey, async () => {
       const fresh = await apiGet("/fixtures", type, { live: "all" });
       const liveCount = Array.isArray(fresh?.response) ? fresh.response.length : 0;
-      const ttlSeconds = Math.max(5, Math.round(liveTtlMs(liveCount) / 1000));
+      const ttlSeconds = Math.max(4, Math.round(liveTtlMs(liveCount) / 1000));
       setCache(cacheKey, fresh, ttlSeconds, 20);
       return fresh;
     });
@@ -304,7 +304,7 @@ export async function getLiveFixtures(
      * Manteniamo un minimo reale per evitare raffiche inutili.
      */
     const ttlSeconds = Math.max(
-      5,
+      4,
       Math.round(liveTtlMs(liveCount) / 1000)
     );
 
@@ -377,11 +377,14 @@ export async function getFixtureStatisticsCached(
   );
 }
 
-export async function getLiveFixtureStatisticsCached(fixtureId: number): Promise<any> {
+export async function getLiveFixtureStatisticsCached(
+  fixtureId: number,
+  ttlSeconds = 8,
+): Promise<any> {
   return fetchStaleWhileRevalidate(
     `liveFixtureStatistics:${fixtureId}`,
-    8,
-    24,
+    Math.max(4, ttlSeconds),
+    Math.max(16, ttlSeconds * 3),
     () => apiGet("/fixtures/statistics", "brainLive", { fixture: fixtureId }),
   );
 }

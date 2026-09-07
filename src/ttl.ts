@@ -1,9 +1,9 @@
 export function liveTtlMs(liveCount: number) {
-  // Un solo profilo rapido, condiviso da tutti gli utenti. Quando non ci sono
-  // gare live evitiamo richieste inutili; durante il gioco aggiorniamo ogni
-  // 8-12 secondi in base al carico corrente.
-  if (liveCount <= 0) return 30_000;
-  if (liveCount <= 5) return 8_000;
-  if (liveCount <= 20) return 10_000;
-  return 12_000;
+  // Una sola chiamata aggiorna tutti gli utenti. Con il piano da 75k possiamo
+  // tenere punteggi ed eventi in corsia rapida senza moltiplicare le richieste
+  // per ogni dispositivo collegato.
+  if (liveCount <= 0) return 20_000;
+  if (liveCount <= 8) return 4_000;
+  if (liveCount <= 30) return 5_000;
+  return 6_000;
 }
