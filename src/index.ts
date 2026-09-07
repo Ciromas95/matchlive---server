@@ -14,6 +14,7 @@ import { inflightSize } from "./inflight";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
 import brainLiveRouter from "./routes/brainLive";
+import lineupsRouter from "./routes/lineups";
 import * as brainLiveModule from "./brainLive";
 import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
@@ -456,6 +457,7 @@ app.get("/api/fixtures/final", async (req: Request, res: Response) => {
 });
 app.use("/api/brain", brainPrematchRouter);
 app.use("/api/brain", brainLiveRouter);
+app.use("/api/lineups", lineupsRouter);
 
 // ===============================
 // SSE stream

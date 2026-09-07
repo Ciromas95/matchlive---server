@@ -102,6 +102,7 @@ const PROVIDER_PROXY_PATHS = new Set([
   "/fixtures/statistics",
   "/fixtures/events",
   "/fixtures/lineups",
+  "/fixtures/players",
   "/fixtures/headtohead",
   "/odds",
   "/injuries",
@@ -118,6 +119,7 @@ const PROVIDER_PROXY_PARAMS: Record<string, Set<string>> = {
   "/fixtures/statistics": new Set(["fixture", "half"]),
   "/fixtures/events": new Set(["fixture"]),
   "/fixtures/lineups": new Set(["fixture"]),
+  "/fixtures/players": new Set(["fixture"]),
   "/fixtures/headtohead": new Set(["h2h", "last"]),
   "/odds": new Set(["fixture"]),
   "/injuries": new Set(["fixture"]),
@@ -130,7 +132,7 @@ const PROVIDER_PROXY_PARAMS: Record<string, Set<string>> = {
 };
 
 function proxyTtl(path: string, params: Record<string, string>) {
-  if (path === "/fixtures/statistics" || path === "/fixtures/events") return 8;
+  if (path === "/fixtures/statistics" || path === "/fixtures/events" || path === "/fixtures/players") return 8;
   if (path === "/fixtures" && (params.live || params.id)) return 8;
   if (path === "/fixtures" && params.date) return 10;
   if (path === "/fixtures/lineups" || path === "/odds") return 60;
@@ -315,6 +317,54 @@ export async function getFixtureById(fixtureId: number): Promise<any> {
   return apiGet("/fixtures", "live", { id: fixtureId });
 }
 
+export async function getFixtureByIdCached(
+  fixtureId: number,
+  ttlSeconds = 60,
+): Promise<any> {
+  return fetchStaleWhileRevalidate(
+    `lineupFixture:${fixtureId}`,
+    ttlSeconds,
+    Math.max(30, ttlSeconds * 3),
+    () => apiGet("/fixtures", "lineups", { id: fixtureId }),
+  );
+}
+
+export async function getFixtureLineupsCached(
+  fixtureId: number,
+  ttlSeconds = 60,
+): Promise<any> {
+  return fetchStaleWhileRevalidate(
+    `fixtureLineups:${fixtureId}`,
+    ttlSeconds,
+    Math.max(30, ttlSeconds * 3),
+    () => apiGet("/fixtures/lineups", "lineups", { fixture: fixtureId }),
+  );
+}
+
+export async function getFixturePlayersCached(
+  fixtureId: number,
+  ttlSeconds = 15,
+): Promise<any> {
+  return fetchStaleWhileRevalidate(
+    `fixturePlayers:${fixtureId}`,
+    ttlSeconds,
+    Math.max(30, ttlSeconds * 3),
+    () => apiGet("/fixtures/players", "lineups", { fixture: fixtureId }),
+  );
+}
+
+export async function getFixtureInjuriesCached(
+  fixtureId: number,
+  ttlSeconds = 15 * 60,
+): Promise<any> {
+  return fetchStaleWhileRevalidate(
+    `fixtureInjuries:${fixtureId}`,
+    ttlSeconds,
+    Math.max(30 * 60, ttlSeconds * 3),
+    () => apiGet("/injuries", "lineups", { fixture: fixtureId }),
+  );
+}
+
 export async function getFixtureStatisticsCached(
   fixtureId: number,
   type: CounterKey = "other",
@@ -423,6 +473,18 @@ export async function getFixtureEventsCached(
   });
 }
 
+export async function getFixtureEventsRealtimeCached(
+  fixtureId: number,
+  ttlSeconds = 10,
+): Promise<any> {
+  return fetchStaleWhileRevalidate<any>(
+    `fixtureEventsRealtime_${fixtureId}`,
+    ttlSeconds,
+    Math.max(20, ttlSeconds * 3),
+    () => apiGet("/fixtures/events", "lineups", { fixture: fixtureId }),
+  );
+}
+
 /// Referto completo di una gara terminata. I dati definitivi non cambiano e
 /// possono essere condivisi tra tutti i profili squadra per un giorno intero.
 export async function getFinishedFixtureDetailsCached(
@@ -516,10 +578,15 @@ const apiFootball = {
   getTopLiveFixtures,
   getLeagueFixturesByDate,
   getFixtureEventsCached,
+  getFixtureEventsRealtimeCached,
   getFixturesByDate,
   getTeamLastFixtures,
   getPlayersByTeam,
   getPlayerById,
+  getFixtureByIdCached,
+  getFixtureLineupsCached,
+  getFixturePlayersCached,
+  getFixtureInjuriesCached,
 };
 
 export default apiFootball;
