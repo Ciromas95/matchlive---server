@@ -14,7 +14,20 @@ export type LineupPlayer = {
   probability: number;
   confirmed: boolean;
   rating?: number;
-  events?: { goals?: number; assists?: number; yellow?: number; red?: number; in?: number; out?: number };
+  events?: {
+    goals?: number;
+    assists?: number;
+    yellow?: number;
+    red?: number;
+    in?: number;
+    out?: number;
+    substitution?: {
+      direction: "in" | "out";
+      minute: number;
+      withId: number;
+      withName: string;
+    };
+  };
   alternatives?: Array<{ id: number; name: string; probability: number }>;
 };
 
@@ -256,7 +269,12 @@ async function buildTeamPrediction(args: {
     return result;
   });
   const selectedIds = new Set(starters.map((p) => p.id));
-  const bench = available.filter((p) => !selectedIds.has(p.id)).sort((a, b) => b.score - a.score).slice(0, 12).map((p) => toPlayer(p));
+  const roleRank = { P: 0, D: 1, C: 2, A: 3 } as const;
+  const bench = available
+    .filter((p) => !selectedIds.has(p.id))
+    .sort((a, b) => roleRank[a.role] - roleRank[b.role] || b.score - a.score)
+    .slice(0, 12)
+    .map((p) => toPlayer(p));
   const averageProbability = starters.reduce((sum, p) => sum + p.probability, 0) / starters.length;
   const formationStability = ([...formations.values()].sort((a, b) => b - a)[0] ?? 0) / ([...formations.values()].reduce((a, b) => a + b, 0) || 1);
   const confidence = Math.round(clamp(averageProbability * 0.72 + usable / 7 * 16 + formationStability * 12 - (congested ? 5 : 0), 35, 94));
@@ -284,8 +302,28 @@ export function eventMap(eventsPayload: any) {
     } else if (/card/i.test(String(event?.type))) {
       if (id) { const e = entry(id); if (/red|second yellow/i.test(String(event?.detail))) e.red = (e.red ?? 0) + 1; else e.yellow = (e.yellow ?? 0) + 1; map.set(id, e); }
     } else if (/subst/i.test(String(event?.type))) {
-      if (id) { const e = entry(id); e.out = minute; map.set(id, e); }
-      if (assistId) { const e = entry(assistId); e.in = minute; map.set(assistId, e); }
+      if (id) {
+        const e = entry(id);
+        e.out = minute;
+        e.substitution = {
+          direction: "out",
+          minute,
+          withId: assistId,
+          withName: String(event?.assist?.name ?? "").trim(),
+        };
+        map.set(id, e);
+      }
+      if (assistId) {
+        const e = entry(assistId);
+        e.in = minute;
+        e.substitution = {
+          direction: "in",
+          minute,
+          withId: id,
+          withName: String(event?.player?.name ?? "").trim(),
+        };
+        map.set(assistId, e);
+      }
     }
   }
   return map;
@@ -307,11 +345,15 @@ function officialTeam(raw: any, events: Map<number, any>, ratings: Map<number, n
     const id = Number(p?.id ?? 0);
     return { id, name: String(p?.name ?? "Giocatore"), photo: p?.photo ?? (id ? `https://media.api-sports.io/football/players/${id}.png` : null), number: asNumber(p?.number), role: roleOf(p?.pos), probability: 100, confirmed: true, rating: ratings.get(id), events: events.get(id) };
   };
+  const roleRank = { P: 0, D: 1, C: 2, A: 3 } as const;
+  const bench = asList(raw?.substitutes)
+    .map(convert)
+    .sort((a, b) => roleRank[a.role] - roleRank[b.role] || a.name.localeCompare(b.name));
   return {
     id: Number(raw?.team?.id ?? 0), name: String(raw?.team?.name ?? "Squadra"), logo: raw?.team?.logo ?? null,
     formation: raw?.formation ? String(raw.formation) : null,
     coach: raw?.coach?.name ? { name: String(raw.coach.name), photo: raw.coach.photo ?? null } : null,
-    starters: asList(raw?.startXI).map(convert), bench: asList(raw?.substitutes).map(convert),
+    starters: asList(raw?.startXI).map(convert), bench,
   };
 }
 

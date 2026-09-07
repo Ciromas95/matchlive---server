@@ -50,7 +50,7 @@ test("eventi live: aggrega gol, assist, cartellini e sostituzioni per giocatore"
     { type: "Goal", detail: "Goal Disallowed", player: { id: 11 } },
     { type: "Card", detail: "Red Card", player: { id: 4 } },
     { type: "Card", detail: "Second Yellow card", player: { id: 5 } },
-    { type: "subst", time: { elapsed: 67 }, player: { id: 10 }, assist: { id: 19 } },
+    { type: "subst", time: { elapsed: 67 }, player: { id: 10, name: "Mario Rossi" }, assist: { id: 19, name: "Luca Bianchi" } },
   ] });
   assert.equal(map.get(10)?.goals, 2);
   assert.equal(map.get(11)?.goals, undefined);
@@ -59,6 +59,8 @@ test("eventi live: aggrega gol, assist, cartellini e sostituzioni per giocatore"
   assert.equal(map.get(5)?.red, 1);
   assert.equal(map.get(10)?.out, 67);
   assert.equal(map.get(19)?.in, 67);
+  assert.deepEqual(map.get(10)?.substitution, { direction: "out", minute: 67, withId: 19, withName: "Luca Bianchi" });
+  assert.deepEqual(map.get(19)?.substitution, { direction: "in", minute: 67, withId: 10, withName: "Mario Rossi" });
 });
 
 test("accuratezza: confronta la previsione salvata con gli undici ufficiali", () => {
