@@ -341,8 +341,16 @@ function addCoreSelection(
   if (price.bookmakerCount < 2 || price.consensusProbability == null) return;
   const resultMarket = ["1", "2", "1X", "X2"].includes(market);
   if (quality < (resultMarket ? 0.72 : 0.5)) return;
-  if (probability < coreThreshold(market)) return;
-  if (Math.abs(probability - price.consensusProbability) > 0.16) return;
+  const threshold = coreThreshold(market);
+  const marketGap = Math.abs(probability - price.consensusProbability);
+  // Corsia borderline controllata: evita di perdere proposte solide per pochi
+  // millesimi, ma richiede qualità alta e consenso di almeno tre bookmaker.
+  // I mercati risultato restano volutamente più severi.
+  const controlledBorderline = !resultMarket &&
+    quality >= 0.64 && price.bookmakerCount >= 3 &&
+    probability >= threshold - 0.015 && marketGap <= 0.12;
+  if (probability < threshold && !controlledBorderline) return;
+  if (marketGap > 0.16) return;
   const finalProbability = robustFinalProbability(
     probability,
     price.consensusProbability,
@@ -352,8 +360,10 @@ function addCoreSelection(
   const stableProbability = finalProbability - uncertainty;
   const expectedValue = finalProbability * referenceOdd - 1;
   const minimumEdge = resultMarket ? 0.035 : 0.015;
-  if (stableProbability < coreThreshold(market) - 0.03) return;
-  if (expectedValue < minimumEdge) return;
+  const stableFloor = threshold - (controlledBorderline ? 0.045 : 0.03);
+  const edgeFloor = controlledBorderline ? Math.max(minimumEdge, 0.025) : minimumEdge;
+  if (stableProbability < stableFloor) return;
+  if (expectedValue < edgeFloor) return;
   selections.push({
     market,
     label: market,

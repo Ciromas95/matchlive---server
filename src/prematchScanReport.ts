@@ -15,6 +15,20 @@ export type PrematchScanReport = {
   acceptedFixtures: number;
   excluded: Record<string, number>;
   failures: string[];
+  decisions: Array<{
+    fixtureId: number;
+    kickoff: string | null;
+    league: string;
+    country: string;
+    home: string;
+    away: string;
+    status: "scelta" | "esclusa" | "fornitore";
+    reason: string;
+    market?: string | null;
+    referenceOdd?: number | null;
+    probability?: number | null;
+    dataQuality?: number | null;
+  }>;
 };
 
 const volume = (process.env.RAILWAY_VOLUME_MOUNT_PATH ?? "").trim();

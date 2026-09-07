@@ -1,4 +1,3 @@
-import { runtimeModeStore } from "./runtimeMode";
 import { getCache, setCache } from "./cache";
 import {
   markCacheHit,
@@ -11,7 +10,6 @@ import {
 import { getTopLiveFixtures, getLiveFixtureStatisticsCached } from "./apiFootball";
 import { evaluateLiveV4, LiveObservationV4, parseLiveStatsV4 } from "./liveStrategyV4";
 import { sendBrainLivePush } from "./push";
-import { isApiEcoMode } from "./ttl";
 import { loadBrainLiveState, saveBrainLiveState } from "./brainLiveState";
 
 type BrainLiveCandidate = {
@@ -59,6 +57,7 @@ const halftimeBaselines = new Map<number, LiveObservationV4>();
 const activeSignalScore = new Map<number, { home: number; away: number }>();
 const activeSignals = new Map<number, any>();
 const cooldownUntilMinute = new Map<number, number>();
+const weakSignalObservations = new Map<number, number>();
 let stateHydration: Promise<void> | null = null;
 
 function hydratePersistentState() {
@@ -90,13 +89,19 @@ function persistState() {
   });
 }
 
-function statsForCurrentHalf(fixtureId: number, observation: LiveObservationV4): LiveObservationV4['stats'] {
+function statsForCurrentHalf(fixtureId: number, observation: LiveObservationV4): LiveObservationV4['stats'] | null {
   if (observation.elapsed <= 45) {
     halftimeBaselines.set(fixtureId, observation);
     return observation.stats;
   }
   const baseline = halftimeBaselines.get(fixtureId);
-  if (!baseline) return observation.stats;
+  if (!baseline) {
+    // Se il server entra durante il 2T non conosce i valori dell'intervallo:
+    // registra qui il punto zero e aspetta il prossimo aggiornamento. Usare i
+    // totali della gara produrrebbe una lettura 2T falsa.
+    halftimeBaselines.set(fixtureId, observation);
+    return null;
+  }
   const delta = (now: number | null, before: number | null) =>
     now == null ? null : Math.max(0, now - (before ?? 0));
   const secondMinutes = Math.max(1, observation.elapsed - 45);
@@ -146,11 +151,11 @@ const ALLOWED_LEAGUE_IDS = new Set<number>([
   207, // Switzerland Super League
 ]);
 
-const finalResultTtlSec = () => isApiEcoMode() ? 120 : 10;
-const precomputedCacheTtlSec = () => isApiEcoMode() ? 300 : 18;
+const finalResultTtlSec = () => 8;
+const precomputedCacheTtlSec = () => 10;
 
-const POLL_MS_NO_TOP_LIVE = 90_000;
-const POLL_MS_FEW_TOP_LIVE = 15_000;
+const POLL_MS_NO_TOP_LIVE = 30_000;
+const POLL_MS_FEW_TOP_LIVE = 10_000;
 const POLL_MS_MANY_TOP_LIVE = 10_000;
 
 function logDebug(...args: any[]) {
@@ -160,7 +165,6 @@ function logDebug(...args: any[]) {
 }
 
 function getNextPollIntervalMs(topLiveCount: number): number {
-  if (isApiEcoMode()) return topLiveCount <= 0 ? 10 * 60_000 : 3 * 60_000;
   if (topLiveCount <= 0) return POLL_MS_NO_TOP_LIVE;
   if (topLiveCount <= 3) return POLL_MS_FEW_TOP_LIVE;
   return POLL_MS_MANY_TOP_LIVE;
@@ -412,7 +416,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
       const bElapsed = Number(b.fixture?.fixture?.status?.elapsed ?? 0);
       return aElapsed - bElapsed;
     })
-    .slice(0, maxResults)
+    .slice(0, Math.max(maxResults, 40))
     .map((x) => toCandidate(x.fixture))
     .filter((x): x is BrainLiveCandidate => x != null);
 
@@ -446,25 +450,59 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
       if (fullObservation.elapsed <= 45) {
         halftimeBaselines.set(candidate.fixtureId, fullObservation);
       }
+      const periodStats = statsForCurrentHalf(candidate.fixtureId, fullObservation);
+      if (!periodStats) return null;
       const observation: LiveObservationV4 = {
         ...fullObservation,
         phaseElapsed: fullObservation.elapsed > 45
           ? fullObservation.elapsed - 45
           : fullObservation.elapsed,
-        stats: statsForCurrentHalf(candidate.fixtureId, fullObservation),
+        stats: periodStats,
       };
       const history = liveHistory.get(candidate.fixtureId) ?? [];
       const previous = [...history].reverse().find((item) =>
         (item.elapsed > 45) === (observation.elapsed > 45) &&
         observation.elapsed - item.elapsed >= 1 && observation.elapsed - item.elapsed <= 12
       );
+      const previous5 = [...history].reverse().find((item) =>
+        (item.elapsed > 45) === (observation.elapsed > 45) &&
+        observation.elapsed - item.elapsed >= 2 && observation.elapsed - item.elapsed <= 7
+      );
       const last = history[history.length - 1];
       if (!last || last.elapsed !== observation.elapsed || JSON.stringify(last.stats) !== JSON.stringify(observation.stats)) {
         history.push(observation);
       }
-      liveHistory.set(candidate.fixtureId, history.filter((item) => observation.elapsed - item.elapsed <= 12));
-      const signal = evaluateLiveV4(observation, previous);
-      if (!signal) return null;
+      liveHistory.set(candidate.fixtureId, history.filter((item) => observation.elapsed - item.elapsed <= 15));
+      const signal = evaluateLiveV4(observation, previous, previous5);
+      if (!signal) {
+        const active = activeSignals.get(candidate.fixtureId);
+        if (!active) return null;
+        const weakCount = (weakSignalObservations.get(candidate.fixtureId) ?? 0) + 1;
+        weakSignalObservations.set(candidate.fixtureId, weakCount);
+        // Isteresi: una sola fotografia debole non fa lampeggiare/sparire la card.
+        if (weakCount >= 2) {
+          activeSignals.delete(candidate.fixtureId);
+          activeSignalScore.delete(candidate.fixtureId);
+          weakSignalObservations.delete(candidate.fixtureId);
+          return null;
+        }
+        const homeTarget = active.goalTarget === "home";
+        const ownShots = homeTarget ? observation.stats.shotsHome : observation.stats.shotsAway;
+        const ownSot = homeTarget ? observation.stats.shotsOnGoalHome : observation.stats.shotsOnGoalAway;
+        const ownCorners = homeTarget ? observation.stats.cornersHome : observation.stats.cornersAway;
+        const retained = {
+          ...active,
+          ...candidate,
+          elapsed: candidate.elapsed,
+          phase: observation.elapsed > 45 ? "2H" : "1H",
+          phaseElapsed: observation.phaseElapsed,
+          stats: observation.stats,
+          interestingMicroInsight: `${ownShots ?? 0} tiri · ${ownSot ?? 0} nello specchio · ${ownCorners ?? 0} corner`,
+        };
+        activeSignals.set(candidate.fixtureId, retained);
+        return retained;
+      }
+      weakSignalObservations.delete(candidate.fixtureId);
       activeSignalScore.set(candidate.fixtureId, {
         home: candidate.home.goals,
         away: candidate.away.goals,
@@ -499,6 +537,7 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
       Number(signal.discoveredAt ?? signal.elapsed ?? 0), elapsed, statusShort,
     )) {
       activeSignals.delete(fixtureId);
+      weakSignalObservations.delete(fixtureId);
       if (!fixture || !LIVE_STATUSES.has(statusShort)) activeSignalScore.delete(fixtureId);
       continue;
     }
@@ -611,7 +650,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
   const run = async () => {
     if (brainLivePollerBusy) {
       logDebug("[brainLive] poller skipped: previous run still in progress");
-      scheduleNextRun(run, isApiEcoMode() ? 3 * 60_000 : POLL_MS_FEW_TOP_LIVE);
+      scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
       return;
     }
 
@@ -633,13 +672,12 @@ function startBrainLivePoller(maxResults: number = 8): void {
         e?.response?.data ?? e?.message ?? e
       );
 
-      scheduleNextRun(run, isApiEcoMode() ? 3 * 60_000 : POLL_MS_FEW_TOP_LIVE);
+      scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
     } finally {
       brainLivePollerBusy = false;
     }
   };
 
-  runtimeModeStore().subscribe(mode => scheduleNextRun(run, mode === "eco" ? 3 * 60_000 : 1000));
   void run();
 
   logDebug(

@@ -1,4 +1,4 @@
-import { isApiEcoMode } from "./runtimeMode";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -57,8 +57,11 @@ type CacheMetrics = {
   missesToday: number;
 };
 
-const DAILY_API_BUDGET = Number(process.env.API_DAILY_BUDGET ?? "7500");
+const DAILY_API_BUDGET = Number(process.env.API_DAILY_BUDGET ?? "75000");
 const METRICS_STORE_PATH = process.env.METRICS_STORE_PATH ?? "/data/brainlive-api-metrics.json";
+const API_KEY_FINGERPRINT = process.env.API_FOOTBALL_KEY
+  ? createHash("sha256").update(process.env.API_FOOTBALL_KEY).digest("hex").slice(0, 16)
+  : null;
 
 let lastResetDay = new Date().toISOString().slice(0, 10);
 
@@ -116,6 +119,7 @@ const brainLive: BrainLiveMetrics = {
 };
 
 type PersistedMetrics = {
+  apiKeyFingerprint?: string | null;
   lastResetDay?: string;
   provider?: Partial<ProviderMetrics>;
   providerQuota?: Partial<ProviderQuotaMetrics>;
@@ -133,9 +137,18 @@ function restoreMetrics() {
     if (!fs.existsSync(METRICS_STORE_PATH)) return;
     const saved = JSON.parse(fs.readFileSync(METRICS_STORE_PATH, "utf8")) as PersistedMetrics;
     if (typeof saved.lastResetDay === "string") lastResetDay = saved.lastResetDay;
+    const sameProviderAccount = saved.apiKeyFingerprint === API_KEY_FINGERPRINT;
     Object.assign(provider, saved.provider ?? {});
     Object.assign(provider.byTypeToday, saved.provider?.byTypeToday ?? {});
-    Object.assign(providerQuota, saved.providerQuota ?? {});
+    if (sameProviderAccount) {
+      Object.assign(providerQuota, saved.providerQuota ?? {});
+    } else {
+      provider.callsToday = 0;
+      provider.callsLastMinute = 0;
+      Object.keys(provider.byTypeToday).forEach((key) => {
+        provider.byTypeToday[key as CounterKey] = 0;
+      });
+    }
     Object.assign(traffic, saved.traffic ?? {});
     Object.assign(traffic.endpointByPathToday, saved.traffic?.endpointByPathToday ?? {});
     Object.assign(cache, saved.cache ?? {});
@@ -151,7 +164,15 @@ function persistMetrics() {
     const tempPath = `${METRICS_STORE_PATH}.tmp`;
     fs.writeFileSync(
       tempPath,
-      JSON.stringify({ lastResetDay, provider, providerQuota, traffic, cache, brainLive }),
+      JSON.stringify({
+        apiKeyFingerprint: API_KEY_FINGERPRINT,
+        lastResetDay,
+        provider,
+        providerQuota,
+        traffic,
+        cache,
+        brainLive,
+      }),
       "utf8",
     );
     fs.renameSync(tempPath, METRICS_STORE_PATH);
@@ -209,7 +230,11 @@ export function markApiCall(type: CounterKey) {
 }
 
 /** Conteggio ufficiale restituito da API-Football in ogni risposta. */
-export function syncProviderQuota(headers: any, requestedAt = Date.now()) {
+export function syncProviderQuota(
+  headers: any,
+  requestedAt = Date.now(),
+  authoritative = false,
+) {
   const read = (name: string): unknown => {
     if (!headers) return null;
     if (typeof headers.get === "function") {
@@ -254,7 +279,7 @@ export function syncProviderQuota(headers: any, requestedAt = Date.now()) {
       ? providerQuota.dailyLimit - providerQuota.dailyRemaining : null;
     const incomingUsed = dailyLimit - dailyRemaining;
     const samePeriod = providerQuota.day === day;
-    const used = samePeriod && previousUsed != null
+    const used = !authoritative && samePeriod && previousUsed != null
       ? Math.max(previousUsed, incomingUsed) : incomingUsed;
     providerQuota.dailyLimit = dailyLimit;
     providerQuota.dailyRemaining = dailyLimit - used;
@@ -441,8 +466,6 @@ export function getApiStats() {
               ? "Ultimo conteggio confermato. In attesa del rinnovo API-Football"
               : "Conteggio letto direttamente da API-Football")
           : "In attesa della prima risposta API-Football dopo l'avvio del server",
-      ecoMode:
-        isApiEcoMode(),
       memoryServedToday,
       memorySaveRate,
       appRequestsToday: traffic.appRequestsToday,
@@ -465,16 +488,16 @@ function getReadableStatus(usedPct: number) {
   }
   if (usedPct >= 0.9) {
     return {
-      label: "Risparmio forte",
+      label: "Consumo elevato",
       description:
-        "Hai superato il 90% del budget giornaliero: conviene servire più dati dalla memoria del server.",
+        "Hai superato il 90% del budget giornaliero. La cache condivisa continua a proteggere il servizio.",
     };
   }
   if (usedPct >= 0.7) {
     return {
       label: "Attenzione",
       description:
-        "Consumo alto ma ancora gestibile. Il server può rallentare gli aggiornamenti meno urgenti.",
+        "Consumo alto ma ancora gestibile. Controlla quali sezioni stanno usando più chiamate.",
     };
   }
   return {

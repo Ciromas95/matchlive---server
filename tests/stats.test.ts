@@ -115,6 +115,15 @@ test("quota dashboard: il fornitore decide il conteggio e il rinnovo", async (t)
       assert.equal(calls, 3);
       assert.equal(stats.getApiStats().provider.callsToday, 7500);
     });
+
+    await t.test("lo status ufficiale riallinea esattamente il contatore", () => {
+      const stats = load();
+      stats.syncProviderQuota(quota(120));
+      stats.syncProviderQuota(quota(119));
+      assert.equal(stats.getApiStats().provider.callsToday, 120);
+      stats.syncProviderQuota(quota(119), Date.now() + 1, true);
+      assert.equal(stats.getApiStats().provider.callsToday, 119);
+    });
   } finally {
     if (oldStore == null) delete process.env.METRICS_STORE_PATH;
     else process.env.METRICS_STORE_PATH = oldStore;

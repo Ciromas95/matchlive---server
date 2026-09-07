@@ -79,7 +79,11 @@ function logistic(value: number): number {
  * quale segnale sia sensato: una squadra già avanti non riceve una card di
  * dominio; la squadra sotto di un gol può invece generare un segnale pareggio.
  */
-export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObservationV4) {
+export function evaluateLiveV4(
+  current: LiveObservationV4,
+  previous10?: LiveObservationV4,
+  previous5?: LiveObservationV4,
+) {
   const { elapsed, homeGoals, awayGoals, stats: s } = current;
   const phaseElapsed = current.phaseElapsed ?? elapsed;
   const insideBettingWindow =
@@ -94,6 +98,7 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
   const scoreGap = Math.abs(homeGoals - awayGoals);
   if (scoreGap >= 2) return null;
 
+  const previous = previous10;
   const window = previous ? elapsed - previous.elapsed : 0;
   const sameScore = previous != null && previous.homeGoals === homeGoals && previous.awayGoals === awayGoals;
   const hasWindow = sameScore && window >= 1 && window <= 12;
@@ -104,6 +109,13 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
   const recentSotA = hasWindow ? delta(sotA, previous!.stats.shotsOnGoalAway) : null;
   const recentCornersH = hasWindow ? delta(numberOrZero(s.cornersHome), previous!.stats.cornersHome) : null;
   const recentCornersA = hasWindow ? delta(numberOrZero(s.cornersAway), previous!.stats.cornersAway) : null;
+  const shortWindow = previous5 ? elapsed - previous5.elapsed : 0;
+  const hasShortWindow = previous5 != null && shortWindow >= 1 && shortWindow <= 7 &&
+    previous5.homeGoals === homeGoals && previous5.awayGoals === awayGoals;
+  const shortShotsH = hasShortWindow ? delta(shotsH, previous5!.stats.shotsHome) : null;
+  const shortShotsA = hasShortWindow ? delta(shotsA, previous5!.stats.shotsAway) : null;
+  const shortSotH = hasShortWindow ? delta(sotH, previous5!.stats.shotsOnGoalHome) : null;
+  const shortSotA = hasShortWindow ? delta(sotA, previous5!.stats.shotsOnGoalAway) : null;
 
   const early = phaseElapsed < 15;
   const veryEarly = phaseElapsed < 8;
@@ -125,10 +137,16 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
     const ownXg = home ? s.xgHome : s.xgAway;
     const opponentXg = home ? s.xgAway : s.xgHome;
     const ownInside = numberOrZero(home ? s.shotsInsideBoxHome : s.shotsInsideBoxAway);
+    // Una parata del portiere avversario è un'ulteriore conferma che la
+    // pressione ha prodotto un tiro realmente pericoloso.
+    const opponentSaves = numberOrZero(home ? s.goalkeeperSavesAway : s.goalkeeperSavesHome);
     const ownRed = numberOrZero(home ? s.redsHome : s.redsAway);
     const recentShots = home ? recentShotsH : recentShotsA;
     const recentSot = home ? recentSotH : recentSotA;
     const recentCorners = home ? recentCornersH : recentCornersA;
+    const shortShots = home ? shortShotsH : shortShotsA;
+    const shortOpponentShots = home ? shortShotsA : shortShotsH;
+    const shortSot = home ? shortSotH : shortSotA;
     if (ownRed > 0) continue;
 
     const share = ownShots / Math.max(1, totalShots);
@@ -141,7 +159,16 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
     if (ownShots < minimumShots || ownSot < minimumSot || share < minimumShare) continue;
     if (veryEarly && !extremeStart) continue;
     if (!veryEarly && ownSot - opponentSot < (early ? 1 : 2)) continue;
-    if (hasWindow && (recentShots ?? 0) < 2 && (recentSot ?? 0) < 1 && (recentCorners ?? 0) < 1) continue;
+    // Il volume viene sempre rapportato ai minuti effettivi della frazione.
+    // Cinque tiri in 45 minuti non equivalgono a cinque tiri nei primi 10.
+    const phasePace = ownShots / Math.max(1, phaseElapsed);
+    const recentPace = hasWindow ? numberOrZero(recentShots) / Math.max(1, window) : phasePace;
+    const shortPace = hasShortWindow ? numberOrZero(shortShots) / Math.max(1, shortWindow) : recentPace;
+    const accelerating = shortPace >= recentPace * 1.12 ||
+      numberOrZero(shortSot) >= 2 || numberOrZero(recentCorners) >= 2;
+    if (phasePace < (early ? 0.42 : 0.24)) continue;
+    if (hasWindow && recentPace < 0.24 && (recentSot ?? 0) < 1 && (recentCorners ?? 0) < 1) continue;
+    if (hasShortWindow && numberOrZero(shortShots) <= numberOrZero(shortOpponentShots) && !accelerating) continue;
 
     const trailing = ownGoals < opponentGoals;
     let evidence = -1.0;
@@ -151,9 +178,12 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
     evidence += clamp(sotPerMinute * 2.2, 0, 0.7);
     evidence += clamp(ownCorners * 0.07, 0, 0.35);
     evidence += clamp(ownInside * 0.06, 0, 0.35);
+    evidence += clamp(opponentSaves * 0.07, 0, 0.35);
     if (ownPossession != null) evidence += clamp((ownPossession - 50) * 0.012, -0.15, 0.3);
     if (ownXg != null && opponentXg != null) evidence += clamp((ownXg - opponentXg) * 0.38, -0.2, 0.55);
     if (hasWindow) evidence += clamp(numberOrZero(recentShots) * 0.08 + numberOrZero(recentSot) * 0.16, 0, 0.55);
+    if (hasShortWindow) evidence += clamp(shortPace * 0.45 + numberOrZero(shortSot) * 0.10, 0, 0.5);
+    if (accelerating) evidence += 0.12;
     if (trailing) evidence += 0.12;
     const probability = clamp(logistic(evidence), 0.05, 0.94);
     const threshold = veryEarly ? 0.72 : early ? 0.68 : trailing ? 0.64 : 0.66;
@@ -170,6 +200,8 @@ export function evaluateLiveV4(current: LiveObservationV4, previous?: LiveObserv
       goalProbability: probability,
       interestingMicroInsight:
         `${ownShots} tiri · ${ownSot} nello specchio · ${ownCorners} corner` +
+        `${opponentSaves > 0 ? ` · ${opponentSaves} parate avversarie` : ""}` +
+        `${hasShortWindow ? ` · ${numberOrZero(shortShots)} tiri negli ultimi ${shortWindow}'` : ""}` +
         `${ownXg != null ? ` · xG ${ownXg.toFixed(2)}` : ""}`,
     });
   }

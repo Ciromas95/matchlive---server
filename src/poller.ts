@@ -1,7 +1,6 @@
-import { runtimeModeStore } from "./runtimeMode";
 import { getFixtureById, getLiveFixtures } from "./apiFootball";
 import { broadcast, clientsCount } from "./stream";
-import { isApiEcoMode, liveTtlMs } from "./ttl";
+import { liveTtlMs } from "./ttl";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 import { pushEnabled, sendFixturePush } from "./push";
 
@@ -242,16 +241,13 @@ export function startPoller() {
       await checkFinishedFixtures(liveIds);
 
       // Poll dinamico coerente con la cache TTL live (ms)
-      const nextMs = isApiEcoMode()
-        ? Math.max(65_000, liveTtlMs(liveCount) + 2_000)
-        : Math.max(15_000, liveTtlMs(liveCount));
+      const nextMs = Math.max(8_000, liveTtlMs(liveCount));
       scheduleNext(nextMs);
     } catch (e: any) {
       console.error("poller error:", e?.message || e);
-      scheduleNext(isApiEcoMode() ? 3 * 60_000 : 15_000);
+      scheduleNext(15_000);
     }
   };
 
-  runtimeModeStore().subscribe(mode => scheduleNext(mode === "eco" ? 65_000 : 1000));
   run();
 }

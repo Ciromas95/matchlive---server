@@ -95,7 +95,10 @@ export function evaluateStrategyV4(input: StrategyInputV3): StrategyEvaluationV4
   }).filter((selection) => {
     // Il V3 ha già superato le soglie del mercato. V4 elimina soltanto i casi
     // nei quali l'intervallo prudente annulla completamente il valore quota.
-    return selection.expectedValue > 0 && selection.stability >= 0.55;
+    const controlledBorderline = !["1", "2", "1X", "X2"].includes(selection.market) &&
+      selection.dataQuality >= 0.64 && selection.expectedValue >= 0.02;
+    return selection.expectedValue > 0 &&
+      selection.stability >= (controlledBorderline ? 0.54 : 0.55);
   });
 
   selections.sort((left, right) => {

@@ -1,4 +1,3 @@
-import { runtimeModeStore } from "./runtimeMode";
 import express, { Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -10,7 +9,7 @@ import { addClient, removeClient } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
 import { refreshProviderQuota } from "./providerQuotaSync";
-import { cacheSize, cacheSnapshot, expireLiveCaches } from "./cache";
+import { cacheSize, cacheSnapshot } from "./cache";
 import { inflightSize } from "./inflight";
 import leagueFixturesRouter from "./routes/leagueFixtures";
 import brainPrematchRouter from "./routes/brainPrematch";
@@ -194,6 +193,23 @@ app.use("/api", (req: Request, _res: Response, next: NextFunction) => {
 
 app.use("/api", rateLimitApi);
 
+app.get("/api/provider", async (req: Request, res: Response) => {
+  const path = String(req.query.path ?? "").trim();
+  const params = { ...req.query } as Record<string, unknown>;
+  delete params.path;
+  try {
+    const payload = await apiFootball.getProviderResource(path, params);
+    setSharedCache(res, path.includes("statistics") || path.includes("events") ? 8 : 30);
+    return res.json(payload);
+  } catch (error: any) {
+    const status = Number(error?.status ?? error?.response?.status ?? 502);
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      error: "provider_request_failed",
+      message: error?.message ?? "Dati temporaneamente non disponibili",
+    });
+  }
+});
+
 // ===============================
 // Metrics heartbeat
 // ===============================
@@ -260,22 +276,6 @@ app.post("/api/admin/logout", requireAdminToken, (req: Request, res: Response) =
     return res.json({ ok: true });
   } catch {
     return res.status(503).json({ error: "Session store unavailable" });
-  }
-});
-
-app.get("/api/admin/runtime-mode", requireAdminToken, (_req, res) => {
-  res.json({ mode: runtimeModeStore().get() });
-});
-app.post("/api/admin/runtime-mode", requireAdminToken, (req, res) => {
-  const mode = req.body?.mode;
-  if (mode !== "eco" && mode !== "fast") return res.status(400).json({ error: "Invalid mode" });
-  try {
-    const previous = runtimeModeStore().get();
-    runtimeModeStore().set(mode);
-    if (previous !== mode && mode === "fast") expireLiveCaches();
-    return res.json({ mode });
-  } catch {
-    return res.status(503).json({ error: "Impossibile salvare la modalità" });
   }
 });
 

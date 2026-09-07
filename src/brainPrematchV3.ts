@@ -1,4 +1,5 @@
 import axios from "axios";
+import { waitForProviderSlot } from "./providerRateLimiter";
 import { getCache, getCacheState, setCache } from "./cache";
 import { runOnce } from "./inflight";
 import { markApiCall, markCacheHit, markCacheMiss, syncProviderQuota } from "./stats";
@@ -87,6 +88,15 @@ type PrematchPickV3 = {
   analysis: Record<string, unknown>;
 };
 
+type FixtureDiagnostic = {
+  status: "scelta" | "esclusa" | "fornitore";
+  reason: string;
+  market?: string | null;
+  referenceOdd?: number | null;
+  probability?: number | null;
+  dataQuality?: number | null;
+};
+
 function apiKey(): string {
   const key = process.env.API_FOOTBALL_KEY;
   if (!key) throw new Error("Missing API_FOOTBALL_KEY in .env");
@@ -94,24 +104,32 @@ function apiKey(): string {
 }
 
 async function apiGet(path: string, params: Record<string, unknown>): Promise<any> {
-  markApiCall("brainPrematch");
-  const quotaRequestedAt = Date.now();
-  try {
-    const response = await axios.get(`${BASE_URL}${path}`, {
-      headers: { "x-apisports-key": apiKey(), Accept: "application/json" },
-      params,
-      timeout: 12_000,
-    });
-    syncProviderQuota(response.headers, quotaRequestedAt);
-    const errors = response.data?.errors;
-    if (errors && (typeof errors === "object" ? Object.keys(errors).length > 0 : Boolean(errors))) {
-      throw new Error("API-Football non ha fornito dati validi per questa richiesta");
+  let lastError: any;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await waitForProviderSlot();
+    markApiCall("brainPrematch");
+    const quotaRequestedAt = Date.now();
+    try {
+      const response = await axios.get(`${BASE_URL}${path}`, {
+        headers: { "x-apisports-key": apiKey(), Accept: "application/json" },
+        params,
+        timeout: 12_000,
+      });
+      syncProviderQuota(response.headers, quotaRequestedAt);
+      const errors = response.data?.errors;
+      if (errors && (typeof errors === "object" ? Object.keys(errors).length > 0 : Boolean(errors))) {
+        throw new Error("API-Football non ha fornito dati validi per questa richiesta");
+      }
+      return response.data;
+    } catch (error: any) {
+      syncProviderQuota(error?.response?.headers, quotaRequestedAt);
+      lastError = error;
+      const status = Number(error?.response?.status ?? 0);
+      if (attempt === 3 || (status >= 400 && status < 500 && status !== 429)) break;
+      await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
     }
-    return response.data;
-  } catch (error: any) {
-    syncProviderQuota(error?.response?.headers, quotaRequestedAt);
-    throw error;
   }
+  throw lastError;
 }
 
 async function cached<T>(
@@ -119,6 +137,7 @@ async function cached<T>(
   ttlSeconds: number,
   staleSeconds: number,
   loader: () => Promise<T>,
+  cacheWhen: (value: T) => boolean = () => true,
 ): Promise<T> {
   const hit = getCache<T>(key);
   if (hit != null) {
@@ -128,7 +147,7 @@ async function cached<T>(
   markCacheMiss();
   return runOnce(key, async () => {
     const value = await loader();
-    setCache(key, value, ttlSeconds, staleSeconds);
+    if (cacheWhen(value)) setCache(key, value, ttlSeconds, staleSeconds);
     return value;
   });
 }
@@ -202,10 +221,16 @@ function fixtureOdds(fixtureId: number, kickoff: string | null) {
     `brainPrematchV3:odds:${fixtureId}:exact-v1`,
     ttl,
     Math.max(600, ttl * 2),
-    async () => ({
-      payload: await apiGet("/odds", { fixture: fixtureId }),
-      fetchedAt: new Date().toISOString(),
-    }),
+    async () => {
+      let payload: any = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        payload = await apiGet("/odds", { fixture: fixtureId });
+        if (Array.isArray(payload?.response) && payload.response.length > 0) break;
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 450 * attempt));
+      }
+      return { payload, fetchedAt: new Date().toISOString() };
+    },
+    (value) => Array.isArray((value as any)?.payload?.response) && (value as any).payload.response.length > 0,
   );
 }
 
@@ -974,15 +999,25 @@ async function loadCornerProfiles(
   };
 }
 
-async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<PrematchPickV3 | null> {
+async function evaluateFixture(
+  fixture: any,
+  allowCorners: boolean,
+  diagnostic?: FixtureDiagnostic,
+): Promise<PrematchPickV3 | null> {
   const fixtureId = Number(fixture?.fixture?.id ?? 0);
   const homeId = Number(fixture?.teams?.home?.id ?? 0);
   const awayId = Number(fixture?.teams?.away?.id ?? 0);
   const leagueId = Number(fixture?.league?.id ?? 0);
   const season = seasonOf(fixture);
   const kickoffMs = fixtureDate(fixture);
-  if (!fixtureId || !homeId || !awayId || !leagueId) return null;
-  if (!Number.isFinite(kickoffMs) || kickoffMs <= Date.now()) return null;
+  if (!fixtureId || !homeId || !awayId || !leagueId) {
+    if (diagnostic) diagnostic.reason = "Identificativi della partita incompleti";
+    return null;
+  }
+  if (!Number.isFinite(kickoffMs) || kickoffMs <= Date.now()) {
+    if (diagnostic) diagnostic.reason = "Partita già iniziata o orario non valido";
+    return null;
+  }
 
   // Prima le quote: non scaricare dossier statistici per mercati assenti,
   // quote sotto soglia o prezzi non confrontabili tra almeno due bookmaker.
@@ -999,7 +1034,10 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
       (price.referenceOdd ?? price.bestOdd)! >= MIN_ODDS_V3[market]
     ),
   );
-  if (!hasCorePrices && !hasCornerPrices) return null;
+  if (!hasCorePrices && !hasCornerPrices) {
+    if (diagnostic) diagnostic.reason = "Quote assenti, sotto 1.47 o non confrontabili tra bookmaker";
+    return null;
+  }
 
   const [currentRaw, previousRaw, h2hRaw, homeRecentRaw, awayRecentRaw, homeNextRaw, awayNextRaw] = await Promise.all([
     leagueSeasonFixtures(leagueId, season),
@@ -1074,11 +1112,15 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
     markets: oddsSnapshot.markets,
     cornerMarkets: oddsSnapshot.cornerMarkets,
   });
-  if (!evaluated.selection) return null;
+  if (!evaluated.selection) {
+    if (diagnostic) diagnostic.reason = "Probabilità, qualità o vantaggio matematico sotto la soglia";
+    return null;
+  }
   const selected = evaluated.selection;
   const marketPrice = selectedPrice(oddsSnapshot, selected.market, selected.line);
   const selectedReferenceOdd = marketPrice.referenceOdd ?? marketPrice.bestOdd;
   if (selectedReferenceOdd == null || selectedReferenceOdd < MIN_ODDS_V3[selected.market] || marketPrice.offers.length < 2) {
+    if (diagnostic) diagnostic.reason = "Quota media sotto 1.47 o confermata da meno di due bookmaker";
     return null;
   }
 
@@ -1176,6 +1218,14 @@ async function evaluateFixture(fixture: any, allowCorners: boolean): Promise<Pre
     analysis,
   };
   pick.insightLine = insight(pick);
+  if (diagnostic) {
+    diagnostic.status = "scelta";
+    diagnostic.reason = "Supera tutti i controlli matematici";
+    diagnostic.market = selected.label;
+    diagnostic.referenceOdd = round(selectedReferenceOdd);
+    diagnostic.probability = round(selected.finalProbability);
+    diagnostic.dataQuality = round(selected.dataQuality);
+  }
   return pick;
 }
 
@@ -1226,6 +1276,16 @@ const preparedDailyResults = new Map<
   string,
   { picks: PrematchPickV3[]; candidates: never[] }
 >();
+const earlyPublishedDailyResults = new Map<
+  string,
+  { picks: PrematchPickV3[]; candidates: never[] }
+>();
+
+function isEarlyKickoffPick(pick: PrematchPickV3, date: string): boolean {
+  if (!pick.date) return false;
+  const clock = italianClock(new Date(pick.date));
+  return clock.date === date && (clock.hour < 10 || (clock.hour === 10 && clock.minute < 15));
+}
 
 /**
  * Dopo la pubblicazione lo snapshot resta immutabile: quote e risposte
@@ -1246,8 +1306,9 @@ export async function buildBrainPrematchV3(date: string, maxMatches = 24): Promi
 }> {
   const max = Math.max(1, Math.min(maxMatches, 250));
   if (!isPrematchPublicationOpenV3(date)) {
+    const early = earlyPublishedDailyResults.get(date);
     return {
-      picks: [],
+      picks: visiblePicks(early?.picks ?? []).slice(0, max),
       candidates: [],
       cacheState: "fresh",
     };
@@ -1285,17 +1346,38 @@ async function compute(date: string, key: string, phase: "preparazione" | "pubbl
   let rejected = 0;
   let failed = 0;
   const failureSamples: string[] = [];
+  const decisions: PrematchScanReport["decisions"] = [];
+  const failedFixtures: any[] = [];
 
   // Piccoli gruppi evitano picchi di chiamate e mantengono il server reattivo.
   for (let index = 0; index < upcoming.length; index += 6) {
     const batch = upcoming.slice(index, index + 6);
     const evaluated = await Promise.all(batch.map(async (fixture) => {
+      const diagnostic: FixtureDiagnostic = {
+        status: "esclusa",
+        reason: "Nessuna selezione ha superato i controlli",
+      };
+      const decisionBase = {
+        fixtureId: Number(fixture?.fixture?.id ?? 0),
+        kickoff: fixture?.fixture?.date ?? null,
+        league: String(fixture?.league?.name ?? ""),
+        country: String(fixture?.league?.country ?? ""),
+        home: String(fixture?.teams?.home?.name ?? "Casa"),
+        away: String(fixture?.teams?.away?.name ?? "Trasferta"),
+      };
       try {
-        const pick = await evaluateFixture(fixture, true);
+        const pick = await evaluateFixture(fixture, true, diagnostic);
         if (!pick) rejected += 1;
+        decisions.push({ ...decisionBase, ...diagnostic });
         return pick;
       } catch (error: any) {
         failed += 1;
+        failedFixtures.push(fixture);
+        decisions.push({
+          ...decisionBase,
+          status: "fornitore",
+          reason: `Risposta temporanea non valida dopo 3 tentativi: ${String(error?.message ?? error).slice(0, 120)}`,
+        });
         if (failureSamples.length < 3) {
           const fixtureId = Number(fixture?.fixture?.id ?? 0);
           failureSamples.push(`${fixtureId}: ${String(error?.message ?? error).slice(0, 160)}`);
@@ -1304,6 +1386,46 @@ async function compute(date: string, key: string, phase: "preparazione" | "pubbl
       }
     }));
     picks.push(...evaluated.filter((pick): pick is PrematchPickV3 => pick != null));
+  }
+
+  // Passaggio di recupero dedicato esclusivamente alle gare fallite: viene
+  // eseguito dopo la scansione principale, quando un eventuale errore
+  // temporaneo del fornitore ha avuto il tempo di rientrare. Non ricalcola le
+  // partite già valutate e quindi mantiene sotto controllo il consumo API.
+  if (failedFixtures.length > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    for (let index = 0; index < failedFixtures.length; index += 3) {
+      const recovered = await Promise.all(
+        failedFixtures.slice(index, index + 3).map(async (fixture) => {
+          const fixtureId = Number(fixture?.fixture?.id ?? 0);
+          const diagnostic: FixtureDiagnostic = {
+            status: "esclusa",
+            reason: "Nessuna selezione ha superato i controlli",
+          };
+          try {
+            const pick = await evaluateFixture(fixture, true, diagnostic);
+            const decisionIndex = decisions.findIndex((item) => item.fixtureId === fixtureId);
+            if (decisionIndex >= 0) decisions[decisionIndex] = {
+              ...decisions[decisionIndex],
+              ...diagnostic,
+            };
+            failed = Math.max(0, failed - 1);
+            if (!pick) rejected += 1;
+            return pick;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      picks.push(...recovered.filter((pick): pick is PrematchPickV3 => pick != null));
+    }
+  }
+  // Dopo il recupero il riepilogo deve mostrare solo gli errori rimasti.
+  failureSamples.splice(0, failureSamples.length);
+  for (const decision of decisions) {
+    if (decision.status === "fornitore" && failureSamples.length < 3) {
+      failureSamples.push(`${decision.fixtureId}: ${decision.reason}`);
+    }
   }
   picks.sort((a, b) => b.score - a.score);
 
@@ -1347,6 +1469,7 @@ async function compute(date: string, key: string, phase: "preparazione" | "pubbl
       erroreFornitore: failed,
     },
     failures: failureSamples,
+    decisions,
   };
   await savePrematchScanReport(report);
   setCache(key, result, 30 * 60, 60 * 60);
@@ -1363,23 +1486,37 @@ export function startBrainPrematchSchedulerV3(): void {
     const clock = italianClock();
     // Tre preparazioni prima delle 10 consentono di recuperare risposte
     // temporanee del fornitore; alle 10 lo snapshot viene pubblicato tutto insieme.
-    const preparing = clock.hour === 8 || clock.hour === 9;
-    const publishing = clock.hour === 10;
-    if (!preparing && !publishing) return;
+    const preparing = clock.hour === 7 || clock.hour === 8 || clock.hour === 9;
+    const publishing = clock.hour === 10 && clock.minute < 15;
+    const notifying = clock.hour === 10 && clock.minute >= 15;
+    if (!preparing && !publishing && !notifying) return;
     const intervalMinutes = preparing ? 30 : 60;
-    const slot = `${clock.date}:${clock.hour}:${Math.floor(clock.minute / intervalMinutes)}`;
+    const stage = preparing ? "prepare" : publishing ? "publish" : "notify";
+    const slot = `${clock.date}:${stage}:${Math.floor(clock.minute / intervalMinutes)}`;
     if (lastScanSlot === slot) return;
     lastScanSlot = slot;
-    const job = publishing
+    const job = publishing || notifying
       ? buildBrainPrematchV3(clock.date, 250)
       : runOnce(`brainPrematchV3:prepare:${slot}`, async () => {
           const prepared = await compute(clock.date, `brainPrematchV3:prepared:${slot}`, "preparazione");
           preparedDailyResults.set(clock.date, prepared);
+          const priorEarly = earlyPublishedDailyResults.get(clock.date)?.picks ?? [];
+          const earlyByFixture = new Map<number, PrematchPickV3>(
+            priorEarly.map((pick) => [pick.fixtureId, pick]),
+          );
+          for (const pick of prepared.picks.filter((item) => isEarlyKickoffPick(item, clock.date))) {
+            earlyByFixture.set(pick.fixtureId, pick);
+          }
+          earlyPublishedDailyResults.set(clock.date, {
+            picks: [...earlyByFixture.values()].sort((left, right) =>
+              new Date(left.date ?? 0).getTime() - new Date(right.date ?? 0).getTime()),
+            candidates: [],
+          });
           return { ...prepared, cacheState: "miss" as const };
         });
     void job
       .then(async (result) => {
-        if (publishing && result.picks.length > 0 && await claimPrematchNotification(clock.date)) {
+        if (notifying && result.picks.length > 0 && await claimPrematchNotification(clock.date)) {
           await sendBrainPrematchPush(result.picks.length);
         }
       })

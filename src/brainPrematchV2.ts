@@ -16,7 +16,6 @@ import {
 } from "./prematchStrategyV2";
 
 const BASE_URL = "https://v3.football.api-sports.io";
-import { isApiEcoMode } from "./runtimeMode";
 const FINISHED = new Set(["FT", "AET", "PEN"]);
 const NOT_STARTED = new Set(["NS", "TBD"]);
 const MAX_PICKS_PER_LEAGUE = 2;
@@ -100,7 +99,7 @@ async function cached<T>(
 function dateFixtures(date: string) {
   return cached(
     `brainPrematchV2:date:${date}`,
-    isApiEcoMode() ? 6 * 3600 : 10 * 60,
+    10 * 60,
     30 * 60,
     () => apiGet("/fixtures", { date }),
   );
@@ -109,7 +108,7 @@ function dateFixtures(date: string) {
 function leagueSeasonFixtures(leagueId: number, season: number, previous = false) {
   return cached(
     `brainPrematchV2:league:${leagueId}:${season}`,
-    previous ? 24 * 3600 : isApiEcoMode() ? 6 * 3600 : 30 * 60,
+    previous ? 24 * 3600 : 30 * 60,
     24 * 3600,
     () => apiGet("/fixtures", { league: leagueId, season }),
   );
@@ -118,7 +117,7 @@ function leagueSeasonFixtures(leagueId: number, season: number, previous = false
 function recentTeamFixtures(teamId: number) {
   return cached(
     `brainPrematchV2:recent:${teamId}:10`,
-    isApiEcoMode() ? 6 * 3600 : 60 * 60,
+    60 * 60,
     6 * 3600,
     () => apiGet("/fixtures", { team: teamId, last: 10 }),
   );
@@ -134,7 +133,6 @@ function headToHead(homeId: number, awayId: number) {
 }
 
 function oddsTtlSeconds(kickoff: string | null): number {
-  if (isApiEcoMode()) return 6 * 3600;
   const kickoffMs = kickoff ? new Date(kickoff).getTime() : Number.NaN;
   const hours = Number.isFinite(kickoffMs) ? (kickoffMs - Date.now()) / 3_600_000 : 48;
   if (hours <= 1) return 120;
@@ -658,7 +656,7 @@ async function compute(date: string, max: number, key: string) {
   }
 
   const result = { picks: finalPicks, candidates: [] as never[] };
-  setCache(key, result, isApiEcoMode() ? 6 * 3600 : 30 * 60, 6 * 3600);
+  setCache(key, result, 30 * 60, 6 * 3600);
   return result;
 }
 

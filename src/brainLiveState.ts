@@ -20,6 +20,8 @@ const statePath = path.resolve(
     : "data/brain-live-state.json"),
 );
 
+let saveQueue: Promise<void> = Promise.resolve();
+
 export async function loadBrainLiveState(): Promise<PersistedBrainLiveState | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(statePath, "utf8"));
@@ -36,17 +38,19 @@ export async function loadBrainLiveState(): Promise<PersistedBrainLiveState | nu
   }
 }
 
-export async function saveBrainLiveState(state: Omit<PersistedBrainLiveState, "version" | "savedAt">) {
-  try {
+export function saveBrainLiveState(state: Omit<PersistedBrainLiveState, "version" | "savedAt">) {
+  const snapshot = JSON.stringify({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    ...state,
+  });
+  saveQueue = saveQueue.then(async () => {
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     const temporary = `${statePath}.tmp`;
-    await fs.writeFile(temporary, JSON.stringify({
-      version: 1,
-      savedAt: new Date().toISOString(),
-      ...state,
-    }), "utf8");
+    await fs.writeFile(temporary, snapshot, "utf8");
     await fs.rename(temporary, statePath);
-  } catch (error: any) {
+  }).catch((error: any) => {
     console.error("[brain-live-state] write failed:", error?.message ?? error);
-  }
+  });
+  return saveQueue;
 }

@@ -1,4 +1,3 @@
-import { isApiEcoMode } from "./runtimeMode";
 import axios from "axios";
 import { getCache, getCacheState, setCache } from "./cache";
 import { getInflight, runOnce } from "./inflight";
@@ -10,6 +9,7 @@ import {
   syncProviderQuota,
 } from "./stats";
 import { liveTtlMs } from "./ttl";
+import { waitForProviderSlot } from "./providerRateLimiter";
 
 const BASE_URL = "https://v3.football.api-sports.io";
 
@@ -61,6 +61,7 @@ async function apiGet(
   type: CounterKey = "other",
   params?: Record<string, any>
 ): Promise<any> {
+  await waitForProviderSlot();
   markApiCall(type);
   const quotaRequestedAt = Date.now();
 
@@ -94,6 +95,89 @@ async function apiGet(
   }
 
   return res.data;
+}
+
+const PROVIDER_PROXY_PATHS = new Set([
+  "/fixtures",
+  "/fixtures/statistics",
+  "/fixtures/events",
+  "/fixtures/lineups",
+  "/fixtures/headtohead",
+  "/odds",
+  "/injuries",
+  "/leagues",
+  "/players",
+  "/players/profiles",
+  "/players/squads",
+  "/teams",
+  "/teams/statistics",
+]);
+
+const PROVIDER_PROXY_PARAMS: Record<string, Set<string>> = {
+  "/fixtures": new Set(["date", "id", "league", "season", "round", "team", "last", "next"]),
+  "/fixtures/statistics": new Set(["fixture", "half"]),
+  "/fixtures/events": new Set(["fixture"]),
+  "/fixtures/lineups": new Set(["fixture"]),
+  "/fixtures/headtohead": new Set(["h2h", "last"]),
+  "/odds": new Set(["fixture"]),
+  "/injuries": new Set(["fixture"]),
+  "/leagues": new Set(["team", "current"]),
+  "/players": new Set(["id", "team", "season", "page"]),
+  "/players/profiles": new Set(["id", "player"]),
+  "/players/squads": new Set(["team"]),
+  "/teams": new Set(["search"]),
+  "/teams/statistics": new Set(["team", "league", "season"]),
+};
+
+function proxyTtl(path: string, params: Record<string, string>) {
+  if (path === "/fixtures/statistics" || path === "/fixtures/events") return 8;
+  if (path === "/fixtures" && (params.live || params.id)) return 8;
+  if (path === "/fixtures" && params.date) return 10;
+  if (path === "/fixtures/lineups" || path === "/odds") return 60;
+  if (path === "/injuries") return 5 * 60;
+  if (path === "/fixtures/headtohead" || path === "/teams/statistics") return 60 * 60;
+  if (path.startsWith("/players")) return 60 * 60;
+  if (path === "/leagues") return 6 * 60 * 60;
+  if (path === "/teams") return 10 * 60;
+  return 5 * 60;
+}
+
+/**
+ * Proxy ristretto usato dall'app per i dettagli non ancora compattati.
+ * La chiave del fornitore non lascia mai il server e richieste identiche di
+ * utenti diversi condividono cache e chiamata in corso.
+ */
+export async function getProviderResource(
+  path: string,
+  rawParams: Record<string, unknown>,
+) {
+  if (!PROVIDER_PROXY_PATHS.has(path)) {
+    const error: any = new Error("Provider endpoint not allowed");
+    error.status = 400;
+    throw error;
+  }
+
+  const params = Object.fromEntries(
+    Object.entries(rawParams)
+      .filter(([key, value]) =>
+        PROVIDER_PROXY_PARAMS[path].has(key) &&
+        typeof value === "string" &&
+        value.length <= 180
+      )
+      .map(([key, value]) => [key, String(value)]),
+  );
+  const signature = Object.entries(params)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  const ttl = proxyTtl(path, params);
+
+  return fetchStaleWhileRevalidate(
+    `provider-proxy:${path}?${signature}`,
+    ttl,
+    Math.max(ttl * 3, 30),
+    () => apiGet(path, "other", params),
+  );
 }
 
 async function fetchWithCache<T>(
@@ -244,11 +328,10 @@ export async function getFixtureStatisticsCached(
 }
 
 export async function getLiveFixtureStatisticsCached(fixtureId: number): Promise<any> {
-  const eco = isApiEcoMode();
   return fetchStaleWhileRevalidate(
     `liveFixtureStatistics:${fixtureId}`,
-    eco ? 180 : 10,
-    eco ? 240 : 30,
+    8,
+    24,
     () => apiGet("/fixtures/statistics", "brainLive", { fixture: fixtureId }),
   );
 }
@@ -262,8 +345,8 @@ export async function getTopLiveFixtures(type: CounterKey = "brainLive"): Promis
 
   return fetchStaleWhileRevalidate<any>(
     cacheKey,
-    isApiEcoMode() ? 180 : 10,
-    30,
+    8,
+    24,
     async () => {
       const data = await apiGet("/fixtures", type, {
         live: BRAIN_LIVE_LIVE_PARAM,
@@ -295,7 +378,7 @@ export async function getLeagueFixturesByDate(
   const cacheKey = `leagueFixtures_${leagueId}_${date}_${season ?? "na"}`;
 
   const today = new Date().toISOString().slice(0, 10);
-  const liveDayTtl = isApiEcoMode() ? 60 : 15;
+  const liveDayTtl = 10;
   const ttl = date === today ? liveDayTtl : 120;
   return fetchWithCache<any>(cacheKey, ttl, async () => {
     const params: Record<string, any> = {
@@ -330,11 +413,12 @@ export async function getStandingsCached(
 
 export async function getFixtureEventsCached(
   fixtureId: number,
-  type: CounterKey = "events"
+  type: CounterKey = "events",
+  ttlSeconds = 600,
 ): Promise<any> {
   const cacheKey = `fixtureEvents_${fixtureId}`;
 
-  return fetchWithCache<any>(cacheKey, 600, async () => {
+  return fetchWithCache<any>(cacheKey, ttlSeconds, async () => {
     return apiGet("/fixtures/events", type, { fixture: fixtureId });
   });
 }
@@ -357,8 +441,8 @@ export async function getFixturesByDate(
 
   const today = new Date().toISOString().slice(0, 10);
   const isToday = date === today;
-  const ttl = isToday ? (isApiEcoMode() ? 60 : 15) : 600;
-  const stale = isToday ? (isApiEcoMode() ? 90 : 20) : 30 * 60;
+  const ttl = isToday ? 10 : 600;
+  const stale = isToday ? 24 : 30 * 60;
   return fetchStaleWhileRevalidate<any>(cacheKey, ttl, stale, async () => {
     return apiGet("/fixtures", type, { date });
   });

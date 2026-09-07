@@ -1,9 +1,9 @@
-import { isApiEcoMode } from "./runtimeMode";
-export { isApiEcoMode } from "./runtimeMode";
-
 export function liveTtlMs(liveCount: number) {
-  if (isApiEcoMode()) {
-    return liveCount <= 0 ? 5 * 60_000 : 60_000;
-  }
-  return 15_000;
+  // Un solo profilo rapido, condiviso da tutti gli utenti. Quando non ci sono
+  // gare live evitiamo richieste inutili; durante il gioco aggiorniamo ogni
+  // 8-12 secondi in base al carico corrente.
+  if (liveCount <= 0) return 30_000;
+  if (liveCount <= 5) return 8_000;
+  if (liveCount <= 20) return 10_000;
+  return 12_000;
 }

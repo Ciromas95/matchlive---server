@@ -6,7 +6,11 @@ type StatusResponse = { data: any; headers: any };
 /** Shared and throttled across admin sessions; never return account details. */
 export function createProviderQuotaSync(
   fetchStatus: () => Promise<StatusResponse>,
-  applyQuota = syncProviderQuota,
+  applyQuota: (
+    headers: any,
+    requestedAt?: number,
+    authoritative?: boolean,
+  ) => void = syncProviderQuota,
   now = () => Date.now(),
 ) {
   let lastAttempt = -Infinity;
@@ -33,7 +37,7 @@ export function createProviderQuotaSync(
           date: result.headers?.get?.("date") ?? result.headers?.date,
           "x-ratelimit-requests-limit": Number(limit),
           "x-ratelimit-requests-remaining": Number(limit) - Number(count),
-        }, startedAt);
+        }, startedAt, true);
       } catch {
         // Offline, expired key or quota rejection: preserve the last confirmed reading.
       }

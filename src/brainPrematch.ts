@@ -9,7 +9,6 @@ import {
 } from "./stats";
 
 const PREMATCH_DEBUG = (process.env.PREMATCH_DEBUG ?? "false").toLowerCase() === "true";
-import { isApiEcoMode } from "./runtimeMode";
 
 function prematchDebug(label: string, payload?: Record<string, unknown>) {
   if (!PREMATCH_DEBUG) return;
@@ -424,7 +423,7 @@ async function getFixturesByDateLocal(date: string): Promise<any> {
 
   return runOnce(cacheKey, async () => {
     const data = await apiGet("/fixtures", { date });
-    setCache(cacheKey, data, isApiEcoMode() ? 6 * 60 * 60 : 600, 30 * 60);
+    setCache(cacheKey, data, 600, 30 * 60);
     return data;
   });
 }
@@ -481,7 +480,7 @@ async function getTeamRecentFixturesLocal(teamId: number): Promise<any> {
   markCacheMiss();
   return runOnce(cacheKey, async () => {
     const data = await apiGet("/fixtures", { team: teamId, last: 5 });
-    setCache(cacheKey, data, isApiEcoMode() ? 6 * 60 * 60 : 60 * 60, 6 * 60 * 60);
+    setCache(cacheKey, data, 60 * 60, 6 * 60 * 60);
     return data;
   });
 }
@@ -521,7 +520,7 @@ async function getFixtureOddsLocal(fixtureId: number): Promise<any> {
 
   return runOnce(cacheKey, async () => {
     const data = await apiGet("/odds", { fixture: fixtureId });
-    setCache(cacheKey, data, isApiEcoMode() ? 6 * 60 * 60 : 15 * 60, 2 * 60 * 60);
+    setCache(cacheKey, data, 15 * 60, 2 * 60 * 60);
     return data;
   });
 }
@@ -2012,7 +2011,7 @@ async function computeBrainPrematch(
   setCache(
     cacheKey,
     result,
-    isApiEcoMode() ? 6 * 60 * 60 : 30 * 60,
+    30 * 60,
     6 * 60 * 60,
   );
   return result;

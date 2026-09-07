@@ -95,3 +95,39 @@ test("live V4: scarta un incontro con due gol di distacco", () => {
   })));
   assert.equal(result, null);
 });
+
+test("live V4: cinque tiri distribuiti in 45 minuti non sono pressione", () => {
+  const result = evaluateLiveV4({
+    ...observation(34, 0, 0, stats({
+      shotsHome: 5, shotsAway: 5,
+      shotsOnGoalHome: 2, shotsOnGoalAway: 2,
+      cornersHome: 2, cornersAway: 2,
+      possessionHome: 51, possessionAway: 49,
+    })),
+    phaseElapsed: 34,
+  });
+  assert.equal(result, null);
+});
+
+test("live V4: accelera quando gli ultimi cinque minuti aumentano la pressione", () => {
+  const previous10 = observation(10, 0, 0, stats({
+    shotsHome: 2, shotsAway: 1,
+    shotsOnGoalHome: 1, shotsOnGoalAway: 0,
+    cornersHome: 1,
+  }));
+  const previous5 = observation(15, 0, 0, stats({
+    shotsHome: 3, shotsAway: 1,
+    shotsOnGoalHome: 1, shotsOnGoalAway: 0,
+    cornersHome: 1,
+  }));
+  const current = observation(20, 0, 0, stats({
+    shotsHome: 9, shotsAway: 2,
+    shotsOnGoalHome: 4, shotsOnGoalAway: 0,
+    cornersHome: 4,
+    shotsInsideBoxHome: 6,
+    possessionHome: 66, possessionAway: 34,
+  }));
+  const result = evaluateLiveV4(current, previous10, previous5);
+  assert.equal(result?.tagType, "homeDom");
+  assert.match(result?.interestingMicroInsight ?? "", /ultimi 5/);
+});
