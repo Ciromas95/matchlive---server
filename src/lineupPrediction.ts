@@ -333,8 +333,10 @@ function ratingMap(payload: any) {
   const map = new Map<number, number>();
   for (const team of asList(payload?.response)) for (const item of asList(team?.players)) {
     const id = Number(item?.player?.id ?? 0);
-    const rating = Number(asList(item?.statistics)[0]?.games?.rating);
-    if (id && Number.isFinite(rating)) map.set(id, Math.round(rating * 10) / 10);
+    const rawRating = asList(item?.statistics)[0]?.games?.rating;
+    if (rawRating == null || String(rawRating).trim() === "") continue;
+    const rating = Number(rawRating);
+    if (id && Number.isFinite(rating) && rating > 0) map.set(id, Math.round(rating * 10) / 10);
   }
   return map;
 }
