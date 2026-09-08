@@ -62,7 +62,9 @@ async function apiGet(
   type: CounterKey = "other",
   params?: Record<string, any>
 ): Promise<any> {
-  await waitForProviderSlot();
+  await waitForProviderSlot(
+    type === "live" || type === "brainLive" ? "critical" : "normal",
+  );
   markApiCall(type);
   const quotaRequestedAt = Date.now();
 

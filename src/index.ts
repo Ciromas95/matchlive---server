@@ -22,6 +22,7 @@ import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
 import { getLiveStateSnapshot, hasLiveState } from "./liveState";
 import { priorityQueueSnapshot } from "./priorityQueue";
+import { providerQueueSnapshot } from "./providerRateLimiter";
 
 dotenv.config();
 
@@ -313,6 +314,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
         : null,
     },
     priorityQueue: priorityQueueSnapshot(),
+    providerQueue: providerQueueSnapshot(),
     users: {
       onlineNow: computeOnlineNow(),
       dauToday: usersSeenToday.size,
