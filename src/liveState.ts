@@ -1,5 +1,7 @@
 import { toLiveCompact } from "./compact";
 import { broadcast } from "./stream";
+import fs from "node:fs";
+import path from "node:path";
 
 export type LiveStateDelta = {
   type: "live_delta";
@@ -27,6 +29,51 @@ let rawFixtures: any[] = g.__BRAINLIVE_RAW_FIXTURES__ ?? [];
 const missingPolls: Map<number, number> =
   g.__BRAINLIVE_MISSING_POLLS__ ??
   (g.__BRAINLIVE_MISSING_POLLS__ = new Map<number, number>());
+const LIVE_STATE_STORE_PATH = process.env.LIVE_STATE_STORE_PATH ??
+  "/data/brainlive-live-state.json";
+let persistTimer: NodeJS.Timeout | null = null;
+
+function restoreFromDisk() {
+  if (compactByFixture.size > 0 || updatedAt != null) return;
+  try {
+    if (!fs.existsSync(LIVE_STATE_STORE_PATH)) return;
+    const saved = JSON.parse(fs.readFileSync(LIVE_STATE_STORE_PATH, "utf8"));
+    const savedAt = Date.parse(String(saved?.updatedAt ?? ""));
+    // Dopo uno stop lungo non mostriamo come live una fotografia ormai vecchia.
+    if (!Number.isFinite(savedAt) || Date.now() - savedAt > 2 * 60_000) return;
+    for (const row of Array.isArray(saved?.fixtures) ? saved.fixtures : []) {
+      const id = Number(row?.fixtureId ?? 0);
+      if (id > 0) compactByFixture.set(id, row);
+    }
+    rawFixtures = Array.isArray(saved?.rawFixtures) ? saved.rawFixtures : [];
+    revision = Number(saved?.revision ?? 0);
+    updatedAt = new Date(savedAt).toISOString();
+  } catch (error: any) {
+    console.warn("[liveState] ripristino ignorato:", error?.message ?? error);
+  }
+}
+
+function schedulePersist() {
+  if (persistTimer || !fs.existsSync(path.dirname(LIVE_STATE_STORE_PATH))) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      const temp = `${LIVE_STATE_STORE_PATH}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify({
+        revision,
+        updatedAt,
+        fixtures: [...compactByFixture.values()],
+        rawFixtures,
+      }));
+      fs.renameSync(temp, LIVE_STATE_STORE_PATH);
+    } catch (error: any) {
+      console.warn("[liveState] salvataggio ignorato:", error?.message ?? error);
+    }
+  }, 15_000);
+  persistTimer.unref?.();
+}
+
+restoreFromDisk();
 
 function fixtureId(row: any): number {
   return Number(row?.fixtureId ?? 0);
@@ -49,6 +96,7 @@ function rememberGlobals() {
   g.__BRAINLIVE_LIVE_REVISION__ = revision;
   g.__BRAINLIVE_LIVE_UPDATED_AT__ = updatedAt;
   g.__BRAINLIVE_RAW_FIXTURES__ = rawFixtures;
+  schedulePersist();
 }
 
 /**
@@ -151,5 +199,7 @@ export function resetLiveStateForTests() {
   revision = 0;
   updatedAt = null;
   missingPolls.clear();
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = null;
   rememberGlobals();
 }
