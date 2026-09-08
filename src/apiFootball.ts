@@ -6,6 +6,7 @@ import {
   markApiCall,
   markCacheHit,
   markCacheMiss,
+  markProviderResult,
   syncProviderQuota,
 } from "./stats";
 import { liveTtlMs } from "./ttl";
@@ -66,6 +67,7 @@ async function apiGet(
   const quotaRequestedAt = Date.now();
 
   let res;
+  const providerStartedAt = Date.now();
   try {
     res = await axios.get(`${BASE_URL}${path}`, {
       headers: {
@@ -77,11 +79,13 @@ async function apiGet(
     });
     syncProviderQuota(res.headers, quotaRequestedAt);
   } catch (error: any) {
+    markProviderResult(Date.now() - providerStartedAt, false);
     syncProviderQuota(error?.response?.headers, quotaRequestedAt);
     throw error;
   }
 
   if (hasProviderErrors(res.data?.errors)) {
+    markProviderResult(Date.now() - providerStartedAt, false);
     const message =
       typeof res.data.errors === "string"
         ? res.data.errors
@@ -93,6 +97,8 @@ async function apiGet(
     };
     throw err;
   }
+
+  markProviderResult(Date.now() - providerStartedAt, true);
 
   return res.data;
 }

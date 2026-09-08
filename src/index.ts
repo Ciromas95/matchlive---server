@@ -21,6 +21,7 @@ import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
 import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
 import { getLiveStateSnapshot, hasLiveState } from "./liveState";
+import { priorityQueueSnapshot } from "./priorityQueue";
 
 dotenv.config();
 
@@ -311,6 +312,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
         ? Math.max(0, Date.now() - Date.parse(liveSnapshot.updatedAt))
         : null,
     },
+    priorityQueue: priorityQueueSnapshot(),
     users: {
       onlineNow: computeOnlineNow(),
       dauToday: usersSeenToday.size,

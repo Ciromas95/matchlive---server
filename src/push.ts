@@ -1,5 +1,6 @@
 import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
+import { enqueueTask, QueuePriority } from "./priorityQueue";
 
 let enabled = false;
 
@@ -36,6 +37,15 @@ export function pushEnabled() {
   return enabled;
 }
 
+function queueAutomaticPush(
+  priority: QueuePriority,
+  label: string,
+  send: () => Promise<void>,
+) {
+  if (!enabled) return;
+  enqueueTask(priority, label, send);
+}
+
 /** Notifica manuale protetta: usata soltanto dal pannello amministratore. */
 export async function sendAdminPushTest() {
   if (!enabled) return false;
@@ -65,7 +75,7 @@ export async function sendBrainLivePush(
   awayName: string,
 ) {
   if (!enabled) return;
-  try {
+  queueAutomaticPush("critical", `brain-live-${fixtureId}`, async () => {
     await getMessaging().send({
       topic: "brainlive_brain_live",
       notification: {
@@ -82,14 +92,12 @@ export async function sendBrainLivePush(
         headers: { "apns-priority": "10" },
       },
     });
-  } catch (error: any) {
-    console.error("[push] invio Cervello Live fallito:", error?.message ?? error);
-  }
+  });
 }
 
 export async function sendBrainPrematchPush(count: number) {
   if (!enabled || count <= 0) return;
-  try {
+  queueAutomaticPush("normal", "brain-prematch", async () => {
     await getMessaging().send({
       topic: "brainlive_brain_prematch",
       notification: {
@@ -108,9 +116,7 @@ export async function sendBrainPrematchPush(count: number) {
         headers: { "apns-priority": "10" },
       },
     });
-  } catch (error: any) {
-    console.error("[push] invio Cervello Prematch fallito:", error?.message ?? error);
-  }
+  });
 }
 
 export async function sendFixturePush(
@@ -124,7 +130,10 @@ export async function sendFixturePush(
   const topic = `brainlive_fixture_${fixtureId}_${type}`;
   const imageUrl = extra.imageUrl?.trim();
   const richImage = extra.matchupImageUrl?.trim() || imageUrl;
-  try {
+  const priority: QueuePriority = type === "goal" || type === "red"
+    ? "critical"
+    : "normal";
+  queueAutomaticPush(priority, topic, async () => {
     await getMessaging().send({
       topic,
       notification: { title, body },
@@ -143,7 +152,5 @@ export async function sendFixturePush(
         ...(richImage ? { fcmOptions: { imageUrl: richImage } } : {}),
       },
     });
-  } catch (error: any) {
-    console.error(`[push] invio ${topic} fallito:`, error?.message ?? error);
-  }
+  });
 }

@@ -40,6 +40,15 @@ type ProviderMetrics = {
   byTypeToday: Record<CounterKey, number>;
 };
 
+type ProviderHealthMetrics = {
+  successes: number;
+  failures: number;
+  consecutiveFailures: number;
+  lastLatencyMs: number | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+};
+
 type ProviderQuotaMetrics = {
   day: string | null;
   dailyLimit: number | null;
@@ -81,6 +90,15 @@ const provider: ProviderMetrics = {
     other: 0,
   },
 };
+const providerHealth: ProviderHealthMetrics = {
+  successes: 0,
+  failures: 0,
+  consecutiveFailures: 0,
+  lastLatencyMs: null,
+  lastSuccessAt: null,
+  lastFailureAt: null,
+};
+const providerLatencySamples: number[] = [];
 
 const providerQuota: ProviderQuotaMetrics = {
   day: null,
@@ -227,6 +245,41 @@ export function markApiCall(type: CounterKey) {
   provider.callsLastMinute += 1;
   provider.byTypeToday[type] += 1;
   persistMetrics();
+}
+
+export function markProviderResult(durationMs: number, successful: boolean) {
+  const safeDuration = Math.max(0, Math.round(durationMs));
+  providerHealth.lastLatencyMs = safeDuration;
+  providerLatencySamples.push(safeDuration);
+  if (providerLatencySamples.length > 120) providerLatencySamples.shift();
+  if (successful) {
+    providerHealth.successes += 1;
+    providerHealth.consecutiveFailures = 0;
+    providerHealth.lastSuccessAt = new Date().toISOString();
+  } else {
+    providerHealth.failures += 1;
+    providerHealth.consecutiveFailures += 1;
+    providerHealth.lastFailureAt = new Date().toISOString();
+  }
+}
+
+function providerHealthSnapshot() {
+  const sorted = [...providerLatencySamples].sort((a, b) => a - b);
+  const average = sorted.length > 0
+    ? Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length)
+    : null;
+  const p95 = sorted.length > 0
+    ? sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]
+    : null;
+  return {
+    ...providerHealth,
+    averageLatencyMs: average,
+    p95LatencyMs: p95,
+    sampleSize: sorted.length,
+    status: providerHealth.consecutiveFailures >= 3
+      ? "degraded"
+      : (p95 != null && p95 > 4000 ? "slow" : "healthy"),
+  };
 }
 
 /** Conteggio ufficiale restituito da API-Football in ogni risposta. */
@@ -416,6 +469,7 @@ export function getApiStats() {
         isOfficial: officialUsed != null,
       },
     },
+    providerHealth: providerHealthSnapshot(),
     traffic: {
       appRequestsTotal: traffic.appRequestsTotal,
       appRequestsToday: traffic.appRequestsToday,
