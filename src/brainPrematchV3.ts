@@ -2,6 +2,9 @@ import axios from "axios";
 import { waitForProviderSlot } from "./providerRateLimiter";
 import { getCache, getCacheState, setCache } from "./cache";
 import { runOnce } from "./inflight";
+import { canStartJobs, trackJob } from "./lifecycle";
+import { markHealthActivity } from "./health";
+import { withJobLease } from "./redisInfrastructure";
 import { markApiCall, markCacheHit, markCacheMiss, syncProviderQuota } from "./stats";
 import {
   emptyTeamStatsV2,
@@ -1480,9 +1483,11 @@ export const buildBrainPrematch = buildBrainPrematchV3;
 export default buildBrainPrematchV3;
 
 /** Pubblica la giornata alle 10:00 italiane senza dipendere dall'apertura dell'app. */
-export function startBrainPrematchSchedulerV3(): void {
+export function startBrainPrematchSchedulerV3(): () => void {
+  let stopped = false;
   let lastScanSlot = "";
   const tick = () => {
+    if (stopped || !canStartJobs()) return;
     const clock = italianClock();
     // Tre preparazioni prima delle 10 consentono di recuperare risposte
     // temporanee del fornitore; alle 10 lo snapshot viene pubblicato tutto insieme.
@@ -1495,31 +1500,26 @@ export function startBrainPrematchSchedulerV3(): void {
     const slot = `${clock.date}:${stage}:${Math.floor(clock.minute / intervalMinutes)}`;
     if (lastScanSlot === slot) return;
     lastScanSlot = slot;
-    const job = publishing || notifying
-      ? buildBrainPrematchV3(clock.date, 250)
-      : runOnce(`brainPrematchV3:prepare:${slot}`, async () => {
-          const prepared = await compute(clock.date, `brainPrematchV3:prepared:${slot}`, "preparazione");
-          preparedDailyResults.set(clock.date, prepared);
-          const priorEarly = earlyPublishedDailyResults.get(clock.date)?.picks ?? [];
-          const earlyByFixture = new Map<number, PrematchPickV3>(
-            priorEarly.map((pick) => [pick.fixtureId, pick]),
-          );
-          for (const pick of prepared.picks.filter((item) => isEarlyKickoffPick(item, clock.date))) {
-            earlyByFixture.set(pick.fixtureId, pick);
-          }
-          earlyPublishedDailyResults.set(clock.date, {
-            picks: [...earlyByFixture.values()].sort((left, right) =>
-              new Date(left.date ?? 0).getTime() - new Date(right.date ?? 0).getTime()),
-            candidates: [],
-          });
-          return { ...prepared, cacheState: "miss" as const };
-        });
-    void job
-      .then(async (result) => {
+    const execution = withJobLease(`prematch:${slot}`, 20 * 60_000, async () => {
+      const result = await (publishing || notifying
+        ? buildBrainPrematchV3(clock.date, 250)
+        : runOnce(`brainPrematchV3:prepare:${slot}`, async () => {
+            const prepared = await compute(clock.date, `brainPrematchV3:prepared:${slot}`, "preparazione");
+            preparedDailyResults.set(clock.date, prepared);
+            const priorEarly = earlyPublishedDailyResults.get(clock.date)?.picks ?? [];
+            const earlyByFixture = new Map<number, PrematchPickV3>(priorEarly.map((pick) => [pick.fixtureId, pick]));
+            for (const pick of prepared.picks.filter((item) => isEarlyKickoffPick(item, clock.date))) earlyByFixture.set(pick.fixtureId, pick);
+            earlyPublishedDailyResults.set(clock.date, { picks: [...earlyByFixture.values()].sort((left, right) =>
+              new Date(left.date ?? 0).getTime() - new Date(right.date ?? 0).getTime()), candidates: [] });
+            return { ...prepared, cacheState: "miss" as const };
+          }));
         if (notifying && result.picks.length > 0 && await claimPrematchNotification(clock.date)) {
           await sendBrainPrematchPush(result.picks.length);
         }
-      })
+        markHealthActivity("prematch");
+        return result;
+      });
+    void trackJob(execution)
       .catch((error) => {
         lastScanSlot = "";
         console.error("[prematch-v4] 10:00 refresh failed:", error?.message ?? error);
@@ -1528,4 +1528,5 @@ export function startBrainPrematchSchedulerV3(): void {
   tick();
   const timer = setInterval(tick, 30_000);
   timer.unref();
+  return () => { stopped = true; clearInterval(timer); };
 }

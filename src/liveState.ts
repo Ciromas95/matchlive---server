@@ -2,6 +2,9 @@ import { toLiveCompact } from "./compact";
 import { broadcast } from "./stream";
 import fs from "node:fs";
 import path from "node:path";
+import { features } from "./featureFlags";
+import { setRedisJson } from "./redisInfrastructure";
+import { shadowWriteDocument } from "./shadowStorage";
 
 export type LiveStateDelta = {
   type: "live_delta";
@@ -66,6 +69,9 @@ function schedulePersist() {
         rawFixtures,
       }));
       fs.renameSync(temp, LIVE_STATE_STORE_PATH);
+      const snapshot = { revision, updatedAt, fixtures: [...compactByFixture.values()], rawFixtures };
+      void shadowWriteDocument("live_state", "current", snapshot, 1, updatedAt ?? new Date().toISOString());
+      if (features.redisLiveState) void setRedisJson("live:snapshot", snapshot, 180);
     } catch (error: any) {
       console.warn("[liveState] salvataggio ignorato:", error?.message ?? error);
     }

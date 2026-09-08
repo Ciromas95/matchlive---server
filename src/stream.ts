@@ -1,12 +1,19 @@
 import { Response } from "express";
+import { sampleSseConnections } from "./telemetry";
 
 type Client = {
   res: Response;
   types: Set<string>;
+  connectedAt: number;
+  bytes: number;
 };
 
 let clients: Client[] = [];
 const MAX_SSE_CLIENTS = Number(process.env.MAX_SSE_CLIENTS ?? "2000");
+let opened = 0, closed = 0, eventsSent = 0, bytesSent = 0, heartbeats = 0, errors = 0, slowClients = 0;
+let connectionDurationMs = 0;
+let sequence = 0;
+const openedAt: number[] = [];
 
 // ===============================
 // SSE DEDUPE (anti-duplicati goal)
@@ -69,13 +76,21 @@ export function addClient(res: Response, types: string[]) {
 
   clients.push({
     res,
-    types: new Set(types.map(t => t.toLowerCase()))
+    types: new Set(types.map(t => t.toLowerCase())),
+    connectedAt: Date.now(),
+    bytes: 0,
   });
+  opened += 1;
+  openedAt.push(Date.now());
+  sampleSseConnections(clients.length);
   return true;
 }
 
 export function removeClient(res: Response) {
+  const found = clients.find((c) => c.res === res);
+  if (found) { closed += 1; connectionDurationMs += Date.now() - found.connectedAt; }
   clients = clients.filter((c) => c.res !== res);
+  sampleSseConnections(clients.length);
 }
 
 export function broadcast(payload: any) {
@@ -98,7 +113,7 @@ export function broadcast(payload: any) {
       `data: ${JSON.stringify(enriched)}\n\n`;
   } else {
     // comportamento originale per tutto il resto
-    msg = `data: ${JSON.stringify(payload)}\n\n`;
+    msg = `id: ${++sequence}\nevent: ${type || "message"}\ndata: ${JSON.stringify(payload)}\n\n`;
   }
 
   const alive: Client[] = [];
@@ -106,10 +121,13 @@ export function broadcast(payload: any) {
   for (const c of clients) {
     try {
       if (c.types.size === 0 || c.types.has(type)) {
-        c.res.write(msg);
+        const writable = c.res.write(msg);
+        eventsSent += 1; bytesSent += Buffer.byteLength(msg); c.bytes += Buffer.byteLength(msg);
+        if (!writable) slowClients += 1;
       }
       alive.push(c);
     } catch {
+      errors += 1;
       try { c.res.end(); } catch {}
     }
   }
@@ -119,4 +137,25 @@ export function broadcast(payload: any) {
 
 export function clientsCount() {
   return clients.length;
+}
+
+export function writeHeartbeat(res: Response, message: string) {
+  try { const ok = res.write(message); heartbeats += 1; bytesSent += Buffer.byteLength(message); if (!ok) slowClients += 1; return ok; }
+  catch { errors += 1; return false; }
+}
+
+export function closeAllClients(reason = "server_shutdown") {
+  const message = `event: shutdown\ndata: ${JSON.stringify({ type: "shutdown", reason, retryAfterSeconds: 4 })}\n\n`;
+  for (const client of clients) { try { client.res.write(message); client.res.end(); } catch {} }
+  for (const client of clients) connectionDurationMs += Date.now() - client.connectedAt;
+  closed += clients.length; clients = []; sampleSseConnections(0);
+}
+
+export function sseSnapshot() {
+  const reconnectCutoff = Date.now() - 60_000;
+  while (openedAt[0] != null && openedAt[0] < reconnectCutoff) openedAt.shift();
+  return { active: clients.length, max: MAX_SSE_CLIENTS, opened, closed,
+    averageDurationMs: closed ? Math.round(connectionDurationMs / closed) : 0,
+    eventsSent, bytesSent, heartbeats, errors, slowClients,
+    reconnectsPerMinute: openedAt.length, backlog: slowClients, droppedEvents: 0, replay: { enabled: false, readyForRedisStreams: true } };
 }

@@ -13,6 +13,7 @@ const cache: Map<string, CacheEntry<any>> =
 
 const DEFAULT_STALE_SECONDS = 10 * 60;
 const MAX_CACHE_ITEMS = Number(process.env.CACHE_MAX_ITEMS ?? "1500");
+let localHits = 0, localMisses = 0, localStaleHits = 0, evictions = 0;
 
 function nowMs() {
   return Date.now();
@@ -23,6 +24,7 @@ function pruneExpired() {
   for (const [key, entry] of cache.entries()) {
     if (entry.staleUntil <= now) {
       cache.delete(key);
+      evictions += 1;
     }
   }
 }
@@ -38,6 +40,7 @@ function enforceMaxSize() {
   for (let i = 0; i < toDelete; i++) {
     const key = entries[i]?.[0];
     if (key) cache.delete(key);
+    if (key) evictions += 1;
   }
 }
 
@@ -65,14 +68,16 @@ export function setCache<T>(
 
 export function getCache<T>(key: string): T | null {
   const entry = cache.get(key);
-  if (!entry) return null;
+  if (!entry) { localMisses += 1; return null; }
 
   if (nowMs() > entry.expiry) {
     cache.delete(key);
+    localMisses += 1;
     return null;
   }
 
   entry.lastAccessAt = nowMs();
+  localHits += 1;
   return entry.value as T;
 }
 
@@ -80,15 +85,17 @@ export function getCacheState<T>(
   key: string
 ): { state: "fresh" | "stale" | "miss"; value: T | null; ageMs: number | null } {
   const entry = cache.get(key);
-  if (!entry) return { state: "miss", value: null, ageMs: null };
+  if (!entry) { localMisses += 1; return { state: "miss", value: null, ageMs: null }; }
 
   const now = nowMs();
   if (now > entry.staleUntil) {
     cache.delete(key);
+    localMisses += 1;
     return { state: "miss", value: null, ageMs: null };
   }
 
   entry.lastAccessAt = now;
+  if (now <= entry.expiry) localHits += 1; else localStaleHits += 1;
 
   return {
     state: now <= entry.expiry ? "fresh" : "stale",
@@ -131,5 +138,19 @@ export function cacheSnapshot() {
     fresh,
     stale,
     maxItems: MAX_CACHE_ITEMS,
+    hits: localHits,
+    misses: localMisses,
+    staleHits: localStaleHits,
+    evictions,
+    hitRate: localHits + localMisses + localStaleHits > 0
+      ? (localHits + localStaleHits) / (localHits + localMisses + localStaleHits)
+      : 0,
+    estimatedBytes: [...cache.entries()].reduce((sum, [key, entry]) => {
+      try { return sum + Buffer.byteLength(key) + Buffer.byteLength(JSON.stringify(entry.value)); }
+      catch { return sum; }
+    }, 0),
+    averageRemainingTtlMs: cache.size
+      ? Math.round([...cache.values()].reduce((sum, entry) => sum + Math.max(0, entry.expiry - now), 0) / cache.size)
+      : 0,
   };
 }

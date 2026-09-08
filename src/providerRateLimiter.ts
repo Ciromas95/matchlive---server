@@ -3,6 +3,7 @@
  * ai caricamenti non urgenti senza superare il limite al minuto.
  */
 const MIN_START_GAP_MS = Number(process.env.API_MIN_REQUEST_GAP_MS ?? "180");
+import { waitForRedisProviderSlot } from "./redisInfrastructure";
 
 export type ProviderPriority = "critical" | "normal";
 type Waiting = { enqueuedAt: number; resolve: () => void };
@@ -33,6 +34,7 @@ async function drain() {
       // superare davvero le richieste normali già accodate.
       const next = takeNext();
       if (!next) continue;
+      await waitForRedisProviderSlot(MIN_START_GAP_MS);
       lastStartedAt = Date.now();
       const waited = Math.max(0, lastStartedAt - next.enqueuedAt);
       totalReleased += 1;

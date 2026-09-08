@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { shadowWriteDocument } from "./shadowStorage";
 
 type PickRecord = {
   fixtureId: number;
@@ -69,6 +70,7 @@ async function writeStore(store: Store) {
   const temporaryPath = `${storePath}.tmp`;
   await fs.writeFile(temporaryPath, JSON.stringify(store, null, 2), "utf8");
   await fs.rename(temporaryPath, storePath);
+  await shadowWriteDocument("prematch_performance", "current", store, store.version);
 }
 
 function runExclusive<T>(action: () => Promise<T>): Promise<T> {

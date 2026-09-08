@@ -4,10 +4,11 @@ import {
   getBrainLiveFromCache,
   getDefaultBrainLivePayload,
 } from "../brainLive";
+import { requirePremiumEntitlement, requireVerifiedFirebaseUser } from "../firebaseAuth";
 
 const brainLiveRouter = express.Router();
 
-brainLiveRouter.get("/live", async (req: Request, res: Response) => {
+brainLiveRouter.get("/live", requireVerifiedFirebaseUser, requirePremiumEntitlement, async (req: Request, res: Response) => {
   try {
     res.setHeader(
       "Cache-Control",

@@ -1,6 +1,8 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { LiveObservationV4 } from "./liveStrategyV4";
+import { shadowWriteDocument } from "./shadowStorage";
+import { setRedisJson } from "./redisInfrastructure";
 
 export type PersistedBrainLiveState = {
   version: 1;
@@ -49,6 +51,9 @@ export function saveBrainLiveState(state: Omit<PersistedBrainLiveState, "version
     const temporary = `${statePath}.tmp`;
     await fs.writeFile(temporary, snapshot, "utf8");
     await fs.rename(temporary, statePath);
+    const parsed = JSON.parse(snapshot);
+    await shadowWriteDocument("brain_live_state", "current", parsed, 1, parsed.savedAt);
+    void setRedisJson("brain-live:state", parsed, 20 * 60 * 60);
   }).catch((error: any) => {
     console.error("[brain-live-state] write failed:", error?.message ?? error);
   });

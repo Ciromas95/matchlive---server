@@ -638,6 +638,8 @@ let brainLivePollerStarted = false;
 let brainLivePollerBusy = false;
 let brainLiveTimer: NodeJS.Timeout | null = null;
 let previousCandidateIds: Set<number> | null = null;
+import { canStartJobs, trackJob } from "./lifecycle";
+import { markHealthActivity } from "./health";
 
 async function notifyNewCandidates(candidates: BrainLiveCandidate[]) {
   await hydratePersistentState();
@@ -666,7 +668,7 @@ function scheduleNextRun(run: () => Promise<void>, delayMs: number) {
   }
 
   brainLiveTimer = setTimeout(() => {
-    void run();
+    if (canStartJobs()) void trackJob(run());
   }, delayMs);
 }
 
@@ -679,6 +681,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
   brainLivePollerStarted = true;
 
   const run = async () => {
+    if (!canStartJobs()) return;
     if (brainLivePollerBusy) {
       logDebug("[brainLive] poller skipped: previous run still in progress");
       scheduleNextRun(run, POLL_MS_FEW_TOP_LIVE);
@@ -690,6 +693,7 @@ function startBrainLivePoller(maxResults: number = 8): void {
     try {
       const built = await refreshBrainLiveCache(maxResults);
       await notifyNewCandidates(built.result.candidates);
+      markHealthActivity("live");
       const nextMs = getNextPollIntervalMs(built.topLiveCount);
 
       logDebug(
@@ -709,11 +713,17 @@ function startBrainLivePoller(maxResults: number = 8): void {
     }
   };
 
-  void run();
+  void trackJob(run());
 
   logDebug(
     `[brainLive] dynamic top-live poller started | maxResults=${maxResults}`
   );
+}
+
+function stopBrainLivePoller(): void {
+  if (brainLiveTimer) clearTimeout(brainLiveTimer);
+  brainLiveTimer = null;
+  brainLivePollerStarted = false;
 }
 
 export {
@@ -722,6 +732,7 @@ export {
   getBrainLiveFromCache,
   getDefaultBrainLivePayload,
   startBrainLivePoller,
+  stopBrainLivePoller,
 };
 
 export type {

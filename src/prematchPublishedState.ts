@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { shadowWriteDocument } from "./shadowStorage";
 
 type PublishedPrematchState = {
   version: 2;
@@ -44,6 +45,7 @@ export async function savePublishedPrematchDay(
     const temporary = `${statePath}.tmp`;
     await fs.writeFile(temporary, JSON.stringify({ version: 2, days }), "utf8");
     await fs.rename(temporary, statePath);
+    await shadowWriteDocument("prematch_publications", date, value, 2);
   } catch (error: any) {
     console.error("[prematch-state] write failed:", error?.message ?? error);
   }

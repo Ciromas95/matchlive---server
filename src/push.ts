@@ -1,6 +1,7 @@
 import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
 import { enqueueTask, QueuePriority } from "./priorityQueue";
+import { pushFailed, pushQueued, pushSent } from "./pushTelemetry";
 
 let enabled = false;
 
@@ -43,7 +44,11 @@ function queueAutomaticPush(
   send: () => Promise<void>,
 ) {
   if (!enabled) return;
-  enqueueTask(priority, label, send);
+  const started = pushQueued(label.replace(/\d{4,}/g, ":fixture"));
+  enqueueTask(priority, label, async () => {
+    try { await send(); pushSent(label.replace(/\d{4,}/g, ":fixture"), started); }
+    catch (error) { pushFailed(label.replace(/\d{4,}/g, ":fixture")); throw error; }
+  });
 }
 
 /** Notifica manuale protetta: usata soltanto dal pannello amministratore. */

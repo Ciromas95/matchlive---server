@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { shadowWriteDocument } from "./shadowStorage";
 
 export type PrematchScanReport = {
   algorithmVersion: string;
@@ -42,6 +43,7 @@ export async function savePrematchScanReport(report: PrematchScanReport) {
     const temporary = `${file}.tmp`;
     await fs.writeFile(temporary, JSON.stringify(report), "utf8");
     await fs.rename(temporary, file);
+    await shadowWriteDocument("prematch_scan", report.date, report, 1, report.completedAt ?? report.startedAt);
   } catch (error: any) {
     console.error("[prematch-report] write failed:", error?.message ?? error);
   }

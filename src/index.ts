@@ -1,11 +1,12 @@
 import express, { Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import helmet from "helmet";
 
 import * as apiFootball from "./apiFootball";
 import { flagUrlFromCountryName } from "./flags";
 import { toLiveCompact } from "./compact";
-import { addClient, clientsCount, removeClient } from "./stream";
+import { addClient, clientsCount, removeClient, writeHeartbeat } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
 import { refreshProviderQuota } from "./providerQuotaSync";
@@ -23,13 +24,31 @@ import { sendAdminPushTest } from "./push";
 import { getLiveStateSnapshot, hasLiveState } from "./liveState";
 import { priorityQueueSnapshot } from "./priorityQueue";
 import { providerQueueSnapshot } from "./providerRateLimiter";
+import { requestContext } from "./logger";
+import { observeHttp } from "./telemetry";
+import { initializeRedis } from "./redisInfrastructure";
+import { initializePostgres } from "./postgresInfrastructure";
+import { detailedHealth, liveHealth, readinessHealth } from "./health";
+import { infrastructureDashboardSnapshot } from "./adminInfrastructure";
+import { installGracefulShutdown, markStartupReady, registerStopTask, trackJob } from "./lifecycle";
+import { validateShadowStorage } from "./shadowStorage";
+import { verifiedFirebaseUser, upsertUserActivity } from "./firebaseAuth";
+import { loadOperationalMetricHistory, persistOperationalMetrics } from "./metricsPersistence";
+import crypto from "node:crypto";
+import { auditAdmin } from "./adminAudit";
+import { postgresReady, query as postgresQuery } from "./postgresInfrastructure";
+import { startLineupScheduler } from "./lineupScheduler";
 
 dotenv.config();
 
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+app.disable("x-powered-by");
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true, credentials: false }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "256kb" }));
+app.use(requestContext(observeHttp));
 
 function setSharedCache(res: Response, seconds: number) {
   const safe = Math.max(1, Math.min(seconds, 60));
@@ -46,7 +65,7 @@ const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX ?? "240");
 const rateBuckets = new Map<string, { start: number; count: number }>();
 
 function rateLimitApi(req: Request, res: Response, next: NextFunction) {
-  if (req.path.startsWith("/admin") || req.path.startsWith("/stream")) {
+  if (req.path.startsWith("/stream")) {
     return next();
   }
 
@@ -60,7 +79,12 @@ function rateLimitApi(req: Request, res: Response, next: NextFunction) {
   }
 
   bucket.count += 1;
-  if (bucket.count > RATE_LIMIT_MAX) {
+  const maximum = req.path === "/admin/login"
+    ? Number(process.env.ADMIN_LOGIN_RATE_LIMIT_MAX ?? "10")
+    : req.path.startsWith("/admin")
+      ? Number(process.env.ADMIN_RATE_LIMIT_MAX ?? "120")
+      : RATE_LIMIT_MAX;
+  if (bucket.count > maximum) {
     res.setHeader("Retry-After", "10");
     return res.status(429).json({
       error: "too_many_requests",
@@ -217,7 +241,7 @@ app.get("/api/provider", async (req: Request, res: Response) => {
 // ===============================
 // Metrics heartbeat
 // ===============================
-app.post("/api/metrics/heartbeat", (req: Request, res: Response) => {
+app.post("/api/metrics/heartbeat", async (req: Request, res: Response) => {
   ensureUsersDay();
 
   const installId = String(req.body?.installId ?? "").trim();
@@ -237,6 +261,9 @@ app.post("/api/metrics/heartbeat", (req: Request, res: Response) => {
   usersLastSeenByInstallId.set(installId, now);
   usersSeenToday.add(installId);
 
+  const user = await verifiedFirebaseUser(req);
+  if (user) void upsertUserActivity(user.uid, String(req.body?.platform ?? "unknown"));
+
   return res.json({ ok: true });
 });
 
@@ -245,6 +272,11 @@ app.post("/api/metrics/heartbeat", (req: Request, res: Response) => {
 // ===============================
 app.get("/", (_req: Request, res: Response) => {
   return res.json({ message: "MatchLive Server attivo 🚀" });
+});
+app.get("/health/live", (_req: Request, res: Response) => res.json(liveHealth()));
+app.get("/health/ready", (_req: Request, res: Response) => {
+  const health = readinessHealth();
+  return res.status(health.ready ? 200 : 503).json(health);
 });
 
 // ===============================
@@ -261,13 +293,17 @@ app.post("/api/admin/login", (req: Request, res: Response) => {
     return res.status(400).json({ error: "Missing pin" });
   }
 
-  if (pin !== ADMIN_PIN) {
+  const pinBuffer = Buffer.from(pin);
+  const expectedBuffer = Buffer.from(ADMIN_PIN);
+  if (pinBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(pinBuffer, expectedBuffer)) {
+    void auditAdmin("login_failed", { ip: req.ip });
     return res.status(401).json({ error: "Wrong pin" });
   }
 
   try {
     const token = adminSessions.create();
-    return res.json({ token, expiresAt: null });
+    void auditAdmin("login_success", { token, ip: req.ip });
+    return res.json({ token, expiresAt: adminSessions.expiresAt(token) });
   } catch {
     return res.status(503).json({ error: "Session store unavailable" });
   }
@@ -277,10 +313,47 @@ app.post("/api/admin/logout", requireAdminToken, (req: Request, res: Response) =
   const token = (req.header("authorization") ?? "").slice(7).trim();
   try {
     adminSessions.revoke(token);
+    void auditAdmin("logout", { token, ip: req.ip });
     return res.json({ ok: true });
   } catch {
     return res.status(503).json({ error: "Session store unavailable" });
   }
+});
+
+app.get("/health/details", rateLimitApi, requireAdminToken, async (_req: Request, res: Response) => {
+  return res.json(await detailedHealth());
+});
+
+app.get("/api/admin/infrastructure", requireAdminToken, async (_req: Request, res: Response) => {
+  return res.json(await infrastructureDashboardSnapshot(getApiStats()));
+});
+
+app.get("/api/admin/infrastructure/history", requireAdminToken, async (req: Request, res: Response) => {
+  const range = String(req.query.range ?? "15m");
+  return res.json({ range, source: "postgres", rows: await loadOperationalMetricHistory(range) });
+});
+
+app.get("/api/admin/users", requireAdminToken, async (req: Request, res: Response) => {
+  if (!postgresReady()) return res.json({ source: "unavailable", users: [], total: 0 });
+  const limit = Math.max(1, Math.min(100, Number(req.query.limit ?? 50)));
+  const offset = Math.max(0, Number(req.query.offset ?? 0));
+  const result = await postgresQuery(`SELECT u.id,u.display_name,u.platform,u.created_at,u.last_active_at,
+    EXISTS(SELECT 1 FROM user_entitlements e WHERE e.user_id=u.id AND e.status='active' AND (e.expires_at IS NULL OR e.expires_at>now())) premium,
+    (SELECT count(*)::int FROM user_favorites f WHERE f.user_id=u.id) favorite_count,
+    count(*) OVER()::int total FROM app_users u ORDER BY u.last_active_at DESC NULLS LAST LIMIT $1 OFFSET $2`, [limit,offset]);
+  return res.json({ source: "postgres", total: result.rows[0]?.total ?? 0, users: result.rows.map(({ total, ...row }: any)=>row) });
+});
+
+app.get("/api/admin/users/:id", requireAdminToken, async (req: Request, res: Response) => {
+  if (!postgresReady()) return res.status(503).json({ error: "database_unavailable" });
+  const userId = String(req.params.id ?? "");
+  const result = await postgresQuery(`SELECT u.id,u.display_name,u.platform,u.created_at,u.last_active_at,
+    (SELECT count(*)::int FROM user_favorites f WHERE f.user_id=u.id) favorite_count,
+    (SELECT count(*)::int FROM user_entitlements e WHERE e.user_id=u.id AND e.status='active') active_entitlements
+    FROM app_users u WHERE u.id=$1`, [userId]);
+  if (!result.rows[0]) return res.status(404).json({ error: "user_not_found" });
+  void auditAdmin("user_detail_viewed", { token: String(req.header("authorization")??"").slice(7), ip:req.ip, targetType:"user", targetId:userId });
+  return res.json(result.rows[0]);
 });
 
 app.post("/api/admin/push-test", requireAdminToken, async (_req, res) => {
@@ -296,6 +369,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
   const cache = cacheSnapshot();
   const prematchScan = await getLatestPrematchScanReport();
   const liveSnapshot = getLiveStateSnapshot();
+  const infrastructure = await infrastructureDashboardSnapshot(stats);
 
   return res.json({
     ...stats,
@@ -321,6 +395,7 @@ app.get("/api/admin/stats", requireAdminToken, async (_req: Request, res: Respon
       sessionsToday: usersSessionsToday,
     },
     prematchScan,
+    infrastructure,
   });
 });
 
@@ -514,7 +589,7 @@ app.get("/api/stream", (req: Request, res: Response) => {
 
   const heartbeat = setInterval(() => {
     try {
-      res.write(`: ping ${Date.now()}\n\n`);
+      writeHeartbeat(res, `: ping ${Date.now()}\n\n`);
     } catch {
       clearInterval(heartbeat);
       removeClient(res);
@@ -552,15 +627,36 @@ app.get("/api/brain-test", (_req: Request, res: Response) => {
 // Server & poller
 // ===============================
 const PORT = Number(process.env.PORT) || 3000;
-
-if (process.env.ENABLE_POLLER !== "false") {
-  startPoller();
-}
-if (process.env.ENABLE_BRAIN_LIVE_POLLER !== "false") {
-  brainLiveModule.startBrainLivePoller(8);
-}
-startBrainPrematchSchedulerV3();
-
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+installGracefulShutdown(server);
+
+async function bootstrap() {
+  await Promise.allSettled([initializeRedis(), initializePostgres()]);
+  if (process.env.ENABLE_POLLER !== "false") {
+    const stop = startPoller();
+    registerStopTask("live-poller", stop);
+  }
+  if (process.env.ENABLE_BRAIN_LIVE_POLLER !== "false") {
+    brainLiveModule.startBrainLivePoller(8);
+    registerStopTask("brain-live-poller", brainLiveModule.stopBrainLivePoller);
+  }
+  if (process.env.ENABLE_PREMATCH_SCHEDULER !== "false") {
+    const stopPrematch = startBrainPrematchSchedulerV3();
+    registerStopTask("prematch-scheduler", stopPrematch);
+  }
+  registerStopTask("lineup-scheduler", startLineupScheduler());
+  const shadowValidationTimer = setInterval(() => void validateShadowStorage(), 5 * 60_000);
+  shadowValidationTimer.unref();
+  registerStopTask("shadow-validator", () => clearInterval(shadowValidationTimer));
+  const metricsTimer = setInterval(() => void persistOperationalMetrics(), 60_000);
+  metricsTimer.unref();
+  registerStopTask("metrics-persistence", async () => { clearInterval(metricsTimer); await persistOperationalMetrics(); });
+  if (process.env.NODE_ENV === "test" && Number(process.env.TEST_ACTIVE_JOB_MS) > 0) {
+    void trackJob(new Promise((resolve) => setTimeout(resolve, Number(process.env.TEST_ACTIVE_JOB_MS))));
+  }
+  markStartupReady();
+}
+
+void bootstrap();

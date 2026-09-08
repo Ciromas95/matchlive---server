@@ -1,6 +1,8 @@
 import { getFixtureById, getLiveFixtures } from "./apiFootball";
 import { broadcast } from "./stream";
 import { liveTtlMs } from "./ttl";
+import { canStartJobs, trackJob } from "./lifecycle";
+import { markHealthActivity } from "./health";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 import { sendFixturePush } from "./push";
 import { publishLiveState } from "./liveState";
@@ -154,13 +156,16 @@ async function checkFinishedFixtures(liveIds: Set<number>) {
 
 export function startPoller() {
   let timer: any;
+  let stopped = false;
 
   const scheduleNext = (ms: number) => {
+    if (stopped) return;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(run, ms);
+    timer = setTimeout(() => { if (!stopped && canStartJobs()) void trackJob(run()); }, ms);
   };
 
   const run = async () => {
+    if (stopped || !canStartJobs()) return;
     try {
       const data = await getLiveFixtures("live", true);
       const fixtures = Array.isArray(data?.response) ? data.response : [];
@@ -236,6 +241,7 @@ export function startPoller() {
       // Pubblica una sola fotografia coerente dopo aver aggiornato anche la
       // cache dei cartellini. Tutte le schermate ricevono lo stesso delta.
       await publishLiveState(data);
+      markHealthActivity("ingestion");
       await checkFinishedFixtures(liveIds);
 
       // Poll dinamico coerente con la cache TTL live (ms)
@@ -247,5 +253,6 @@ export function startPoller() {
     }
   };
 
-  run();
+  void trackJob(run());
+  return () => { stopped = true; if (timer) clearTimeout(timer); };
 }

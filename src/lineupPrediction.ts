@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import * as api from "./apiFootball";
 import { runOnce } from "./inflight";
+import { shadowWriteDocument } from "./shadowStorage";
 
 export type LineupStatus = "predicted" | "official" | "unavailable";
 
@@ -118,6 +119,7 @@ async function updateStore(action: (store: Store) => void) {
     const temporary = `${storePath}.tmp`;
     await fs.writeFile(temporary, JSON.stringify(store), "utf8");
     await fs.rename(temporary, storePath);
+    await shadowWriteDocument("lineup_predictions", "current", store, store.version);
   });
   storeQueue = job.catch(() => undefined);
   return job;
