@@ -158,7 +158,7 @@ export async function sendBrainPrematchPush(count: number) {
 
 export async function sendFixturePush(
   fixtureId: number,
-  type: "kickoff" | "finished" | "red" | "goal",
+  type: "kickoff" | "finished" | "red" | "goal" | "correction",
   title: string,
   body: string,
   extra: Record<string, string> = {},
@@ -171,7 +171,8 @@ export async function sendFixturePush(
   const topic = `brainlive_fixture_${fixtureId}_${type}`;
   const imageUrl = extra.imageUrl?.trim();
   const richImage = extra.matchupImageUrl?.trim() || imageUrl;
-  const priority: QueuePriority = type === "goal" || type === "red"
+  const priority: QueuePriority =
+    type === "goal" || type === "red" || type === "correction"
     ? "critical"
     : "normal";
   queueAutomaticPush(priority, topic, async () => {

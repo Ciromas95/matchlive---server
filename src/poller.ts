@@ -7,6 +7,7 @@ import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 import { sendFixturePush } from "./push";
 import { publishLiveState } from "./liveState";
 import { completeLiveCycle, livePipelineSnapshot } from "./livePipelineTelemetry";
+import { detectScoreCorrection } from "./scoreCorrection";
 
 const lastScore = new Map<number, string>();
 
@@ -205,9 +206,45 @@ export function startPoller() {
         // TTL 90s per sicurezza
         updateRedCardsFromFixture(fixtureId, f, 90_000);
 
-        // score tracking (utile per debug / UI, ma NON lo usiamo più come “trigger unico”)
-        const scoreStr = `${f?.goals?.home ?? 0}-${f?.goals?.away ?? 0}`;
+        // Una diminuzione reale del punteggio tra due snapshot consecutivi è
+        // la fonte autorevole per una rete annullata. Non deduciamo VAR,
+        // fuorigioco o altre motivazioni se API-Football non le comunica.
+        const homeGoals = Number(f?.goals?.home ?? 0);
+        const awayGoals = Number(f?.goals?.away ?? 0);
+        const scoreStr = `${homeGoals}-${awayGoals}`;
         const prev = lastScore.get(fixtureId);
+        if (prev != null && prev !== scoreStr) {
+          const {
+            home: homeCorrected,
+            away: awayCorrected,
+          } = detectScoreCorrection(prev, homeGoals, awayGoals);
+          if (homeCorrected || awayCorrected) {
+            const correctedTeam = homeCorrected
+              ? f?.teams?.home
+              : f?.teams?.away;
+            await sendFixturePush(
+              fixtureId,
+              "correction",
+              "↩️ CORREZIONE",
+              premiumScoreLine(f),
+              {
+                imageUrl: fixtureImage(
+                  f,
+                  Number(correctedTeam?.id) || null,
+                ),
+                homeName: String(f?.teams?.home?.name ?? ""),
+                awayName: String(f?.teams?.away?.name ?? ""),
+                homeLogo: String(f?.teams?.home?.logo ?? ""),
+                awayLogo: String(f?.teams?.away?.logo ?? ""),
+                teamName: String(correctedTeam?.name ?? ""),
+                score: scoreStr,
+                previousScore: prev,
+                elapsed: String(f?.fixture?.status?.elapsed ?? ""),
+                eventKey: `correction:${prev}:${scoreStr}`,
+              },
+            );
+          }
+        }
         if (prev !== scoreStr) lastScore.set(fixtureId, scoreStr);
 
         // eventi: controlliamo SEMPRE (non solo se cambia score)
