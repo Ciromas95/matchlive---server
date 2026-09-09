@@ -5,6 +5,7 @@ import path from "node:path";
 import { features } from "./featureFlags";
 import { setRedisJson } from "./redisInfrastructure";
 import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
+import { recordLiveRedis } from "./livePipelineTelemetry";
 
 export type LiveStateDelta = {
   type: "live_delta";
@@ -188,6 +189,11 @@ export async function publishLiveState(providerPayload: any): Promise<LiveStateD
 
   revision += 1;
   rememberGlobals();
+  if (features.redisLiveState) {
+    const redisStarted = performance.now();
+    await setRedisJson("live:snapshot", { revision, updatedAt, fixtures:[...compactByFixture.values()], rawFixtures }, 180);
+    recordLiveRedis(performance.now() - redisStarted);
+  }
   const delta: LiveStateDelta = {
     type: "live_delta",
     revision,

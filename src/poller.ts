@@ -6,6 +6,7 @@ import { markHealthActivity } from "./health";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 import { sendFixturePush } from "./push";
 import { publishLiveState } from "./liveState";
+import { completeLiveCycle, livePipelineSnapshot } from "./livePipelineTelemetry";
 
 const lastScore = new Map<number, string>();
 
@@ -168,6 +169,7 @@ export function startPoller() {
     if (stopped || !canStartJobs()) return;
     try {
       const data = await getLiveFixtures("live", true);
+      const processingStarted = performance.now();
       const fixtures = Array.isArray(data?.response) ? data.response : [];
       const liveCount = fixtures.length;
 
@@ -238,11 +240,16 @@ export function startPoller() {
       pruneSeenEvents(6 * 60 * 60 * 1000); // 6 ore
       pruneLastScore(liveIds);
       pruneRedCardsLive(liveIds); // ✅
+      const processingMs = performance.now() - processingStarted;
       // Pubblica una sola fotografia coerente dopo aver aggiornato anche la
       // cache dei cartellini. Tutte le schermate ricevono lo stesso delta.
       await publishLiveState(data);
       markHealthActivity("ingestion");
       await checkFinishedFixtures(liveIds);
+      const pipeline = livePipelineSnapshot();
+      completeLiveCycle({ processingMs,
+        redisPublishMs:Number(pipeline.stages.redisPublish.lastMs??0), sseSendMs:Number(pipeline.stages.sseSend.lastMs??0),
+        fixtures:liveCount });
 
       // Poll dinamico coerente con la cache TTL live (ms)
       const nextMs = Math.max(4_000, liveTtlMs(liveCount));

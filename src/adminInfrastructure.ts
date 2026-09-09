@@ -14,6 +14,7 @@ import { priorityQueueSnapshot } from "./priorityQueue";
 import { providerQueueSnapshot } from "./providerRateLimiter";
 import { lineupSchedulerSnapshot } from "./lineupScheduler";
 import { providerResilienceSnapshot } from "./providerResilience";
+import { livePipelineSnapshot } from "./livePipelineTelemetry";
 
 let cached: { at: number; value: any } | null = null;
 
@@ -75,6 +76,7 @@ export async function infrastructureDashboardSnapshot(stats?: any) {
   const shadow = shadowStorageSnapshot();
   const providerResilience = providerResilienceSnapshot();
   const notifications = pushTelemetrySnapshot();
+  const livePipeline = livePipelineSnapshot();
   const queues = { notifications: priorityQueueSnapshot(), provider: providerQueueSnapshot() };
   const provider = stats?.provider ?? {};
   const readable = stats?.readable ?? {};
@@ -85,6 +87,10 @@ export async function infrastructureDashboardSnapshot(stats?: any) {
   const projected = Math.round(callsToday / elapsedDayFraction);
   const quotaPct = dailyLimit > 0 ? callsToday / dailyLimit : 0;
   const alerts = alertSnapshot({ health, telemetry, redis, postgres, sse, providerResilience, notifications, queues });
+  if (livePipeline.latest.providerResponseMs > Number(process.env.LIVE_PROVIDER_LATENCY_ALERT_MS ?? "5000"))
+    alerts.push({id:"live_provider_latency",severity:"warning",message:`API-Football live ha risposto in ${Math.round(livePipeline.latest.providerResponseMs)} ms`,active:true,detectedAt:new Date().toISOString()});
+  if (livePipeline.latest.internalLatencyMs > Number(process.env.LIVE_INTERNAL_LATENCY_ALERT_MS ?? "1000"))
+    alerts.push({id:"live_internal_latency",severity:"critical",message:`Pipeline interna live ${Math.round(livePipeline.latest.internalLatencyMs)} ms`,active:true,detectedAt:new Date().toISOString()});
   if (quotaPct >= .95) alerts.push({ id:"provider_quota_95", severity:"critical", message:`Quota provider al ${(quotaPct*100).toFixed(1)}%`, active:true, detectedAt:new Date().toISOString() });
   else if (quotaPct >= .8) alerts.push({ id:"provider_quota_80", severity:"warning", message:`Quota provider al ${(quotaPct*100).toFixed(1)}%`, active:true, detectedAt:new Date().toISOString() });
   const status = alerts.some((a)=>a.severity==="critical") ? "CRITICAL" : alerts.length ? "DEGRADED" : "HEALTHY";
@@ -92,7 +98,11 @@ export async function infrastructureDashboardSnapshot(stats?: any) {
     enabled: publicFeatureSnapshot().newAdminDashboard,
     systemStatus: status, generatedAt: new Date().toISOString(), health, telemetry, sse, redis, postgres, shadow,
     users, errors: errorCenterSnapshot(), alerts,
-    engines: { ...engineTelemetrySnapshot(), lineupScheduler: lineupSchedulerSnapshot() }, notifications,
+    engines: { ...engineTelemetrySnapshot(), lineupScheduler: lineupSchedulerSnapshot(), modules: {
+      prematch:{status:health.engines?.prematchLastSuccessAt?"operational":"waiting",source:publicFeatureSnapshot().postgresReadPrematch?"PostgreSQL + fallback JSON":"JSON"},
+      live:{status:health.engines?.ingestionLastSuccessAt?"operational":"waiting",source:publicFeatureSnapshot().postgresReadLive?"API-Football + Redis + PostgreSQL fallback":"API-Football + Redis"},
+      lineup:{status:lineupSchedulerSnapshot().lastError?"degraded":"operational",source:publicFeatureSnapshot().postgresReadLineup?"API-Football + PostgreSQL + fallback JSON":"API-Football + JSON"},
+    } }, notifications, livePipeline,
     providerControl: { callsToday, dailyLimit, remaining: Math.max(0,dailyLimit-callsToday), quotaPct,
       projectedEndOfDay: projected, projectionSource: "technical_estimate", officialCount: readable.providerCountIsOfficial === true,
       health: stats?.providerHealth ?? null, resilience: providerResilience, usage: readable.mostExpensiveSections ?? [] },

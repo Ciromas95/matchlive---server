@@ -171,6 +171,16 @@ test("Phase 1: SSE clients are closed cleanly during shutdown", async () => {
   assert.equal(response.ended,true); assert.equal(stream.clientsCount(),0);
 });
 
+test("Control Room separates provider and BrainLive live latency", async () => {
+  const live = await import("../src/livePipelineTelemetry");
+  live.resetLivePipelineTelemetryForTest();
+  live.recordLiveProvider(12,88); live.recordLiveRedis(4); live.recordLiveSse(2);
+  live.completeLiveCycle({processingMs:20,redisPublishMs:4,sseSendMs:2,fixtures:7});
+  const snapshot=live.livePipelineSnapshot();
+  assert.equal(snapshot.latest.providerDelayMs,100); assert.equal(snapshot.latest.internalLatencyMs,26);
+  assert.equal(snapshot.attribution,"provider");
+});
+
 test("Phase 1: admin sessions expire and old persisted sessions remain bounded", async () => {
   const { AdminSessionStore } = await import("../src/adminSessions");
   const file = path.join(process.cwd(),"data","admin-expiry-test.json");

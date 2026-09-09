@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { sampleSseConnections } from "./telemetry";
+import { livePipelineSnapshot, recordLiveSse } from "./livePipelineTelemetry";
 
 type Client = {
   res: Response;
@@ -94,6 +95,7 @@ export function removeClient(res: Response) {
 }
 
 export function broadcast(payload: any) {
+  const started = performance.now();
   const type = (payload?.type ?? "").toString().toLowerCase();
 
   // DEDUPE solo per goal
@@ -101,7 +103,7 @@ export function broadcast(payload: any) {
 
   if (type.toLowerCase() === "goal") {
     const gate = shouldEmitGoal(payload);
-    if (!gate.ok) return; // DUPLICATO -> non inviare
+    if (!gate.ok) return 0; // DUPLICATO -> non inviare
 
     // arricchiamo il payload con dedupeKey
     const enriched = { ...payload, dedupeKey: gate.key };
@@ -133,6 +135,9 @@ export function broadcast(payload: any) {
   }
 
   clients = alive;
+  const durationMs = performance.now() - started;
+  if (["live_delta", "goal", "card", "var"].includes(type)) recordLiveSse(durationMs);
+  return durationMs;
 }
 
 export function clientsCount() {
@@ -157,5 +162,7 @@ export function sseSnapshot() {
   return { active: clients.length, max: MAX_SSE_CLIENTS, opened, closed,
     averageDurationMs: closed ? Math.round(connectionDurationMs / closed) : 0,
     eventsSent, bytesSent, heartbeats, errors, slowClients,
-    reconnectsPerMinute: openedAt.length, backlog: slowClients, droppedEvents: 0, replay: { enabled: false, readyForRedisStreams: true } };
+    reconnectsPerMinute: openedAt.length, backlog: slowClients, droppedEvents: 0,
+    deliveryLatency: livePipelineSnapshot().stages.sseSend,
+    replay: { enabled: false, readyForRedisStreams: true } };
 }

@@ -15,6 +15,7 @@ import { getRedisCache, setRedisCache, withRedisSingleFlight } from "./redisInfr
 import { markHealthActivity } from "./health";
 import { markProviderTelemetryCall } from "./telemetry";
 import { executeProviderRequest } from "./providerResilience";
+import { recordLiveCacheSource, recordLiveProvider } from "./livePipelineTelemetry";
 
 const BASE_URL = "https://v3.football.api-sports.io";
 
@@ -67,7 +68,9 @@ async function apiGet(
   params?: Record<string, any>
 ): Promise<any> {
   return executeProviderRequest(async () => {
+    const queuedAt = Date.now();
     await waitForProviderSlot(type === "live" || type === "brainLive" ? "critical" : "normal");
+    const providerQueueMs = Date.now() - queuedAt;
     markApiCall(type);
     markProviderTelemetryCall();
     const quotaRequestedAt = Date.now();
@@ -81,17 +84,23 @@ async function apiGet(
       });
       syncProviderQuota(res.headers, quotaRequestedAt);
     } catch (error: any) {
-      markProviderResult(Date.now() - providerStartedAt, false);
+      const responseMs = Date.now() - providerStartedAt;
+      markProviderResult(responseMs, false);
+      if (type === "live" || type === "brainLive") recordLiveProvider(providerQueueMs, responseMs);
       syncProviderQuota(error?.response?.headers, quotaRequestedAt);
       throw error;
     }
     if (hasProviderErrors(res.data?.errors)) {
-      markProviderResult(Date.now() - providerStartedAt, false);
+      const responseMs = Date.now() - providerStartedAt;
+      markProviderResult(responseMs, false);
+      if (type === "live" || type === "brainLive") recordLiveProvider(providerQueueMs, responseMs);
       const err: any = new Error("API-Football returned an application error");
       err.response = { status: 502 };
       throw err;
     }
-    markProviderResult(Date.now() - providerStartedAt, true);
+    const responseMs = Date.now() - providerStartedAt;
+    markProviderResult(responseMs, true);
+    if (type === "live" || type === "brainLive") recordLiveProvider(providerQueueMs, responseMs);
     markHealthActivity("provider");
     return res.data;
   });
@@ -289,21 +298,22 @@ export async function getLiveFixtures(
 
   if (cached.state === "fresh" && cached.value != null) {
     markCacheHit();
+    if (type === "live") recordLiveCacheSource("local-cache");
     return cached.value;
   }
 
   const shared = await getRedisCache<any>(cacheKey);
   if (shared.state === "fresh" && shared.value != null) {
-    markCacheHit(); setCache(cacheKey, shared.value, 4, 20); return shared.value;
+    markCacheHit(); if (type === "live") recordLiveCacheSource("redis-cache"); setCache(cacheKey, shared.value, 4, 20); return shared.value;
   }
 
   const running = getInflight<any>(cacheKey);
   if (running) {
     if (cached.state === "stale" && cached.value != null) {
-      markCacheHit();
+      markCacheHit(); if (type === "live") recordLiveCacheSource("inflight");
       return cached.value;
     }
-    markCacheHit();
+    markCacheHit(); if (type === "live") recordLiveCacheSource("inflight");
     return running;
   }
 

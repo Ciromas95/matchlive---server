@@ -18,6 +18,8 @@ let leases = 0;
 let reconnectRetries = 0;
 let cacheWrites = 0;
 let cacheTtlSecondsTotal = 0;
+let rateLimiterRuns = 0, rateLimiterWaits = 0, rateLimiterWaitMs = 0;
+let liveStateWrites = 0, liveStateWriteErrors = 0, liveStateWriteMs = 0;
 
 const prefix = (process.env.REDIS_KEY_PREFIX ?? "brainlive:v1").replace(/:+$/, "");
 const key = (value: string) => `${prefix}:${value}`;
@@ -88,11 +90,13 @@ export async function setRedisCache<T>(cacheKey: string, value: T, ttlSeconds: n
 
 export async function setRedisJson(redisKey: string, value: unknown, ttlSeconds?: number): Promise<void> {
   if (!redisReady()) return;
+  const started = performance.now();
   try {
     const serialized = JSON.stringify(value);
     if (ttlSeconds) await client!.set(key(redisKey), serialized, { EX: Math.max(1, ttlSeconds) });
     else await client!.set(key(redisKey), serialized);
-  } catch (error: any) { errors += 1; lastError = error?.message ?? String(error); }
+    if (redisKey === "live:snapshot") { liveStateWrites += 1; liveStateWriteMs += performance.now()-started; }
+  } catch (error: any) { errors += 1; if(redisKey === "live:snapshot") liveStateWriteErrors += 1; lastError = error?.message ?? String(error); }
 }
 
 export async function getRedisJson<T>(redisKey: string): Promise<T | null> {
@@ -161,12 +165,13 @@ export async function withJobLease<T>(name: string, ttlMs: number, task: () => P
 export async function waitForRedisProviderSlot(gapMs: number): Promise<void> {
   if (!features.redisRateLimit || !redisReady()) return;
   try {
+    rateLimiterRuns += 1;
     const now = Date.now();
     const wait = Number(await client!.eval(
       "local n=tonumber(redis.call('get',KEYS[1]) or '0'); local s=math.max(tonumber(ARGV[1]),n); redis.call('set',KEYS[1],s+tonumber(ARGV[2]),'PX',10000); return s-tonumber(ARGV[1])",
       { keys: [key("provider:next-slot")], arguments: [String(now), String(gapMs)] },
     ));
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    if (wait > 0) { rateLimiterWaits += 1; rateLimiterWaitMs += wait; await new Promise((resolve) => setTimeout(resolve, wait)); }
   } catch { errors += 1; }
 }
 
@@ -185,7 +190,9 @@ export async function redisSnapshot() {
   return { enabled: features.redis, state, ready: redisReady(), latencyMs: lastLatencyMs == null ? null : Math.round(lastLatencyMs * 10) / 10,
     keyCount, memoryBytes, connections, hits, misses, errors, lastError: lastError ? "connection_error" : null,
     locks: { active: leases, acquired: lockAcquired, failed: lockFailed }, singleFlightReuse, reconnectRetries,
-    averageConfiguredTtlSeconds: cacheWrites ? Math.round(cacheTtlSecondsTotal/cacheWrites) : 0, keyPrefix: prefix };
+    averageConfiguredTtlSeconds: cacheWrites ? Math.round(cacheTtlSecondsTotal/cacheWrites) : 0, keyPrefix: prefix,
+    rateLimiter:{enabled:features.redisRateLimit,runs:rateLimiterRuns,waits:rateLimiterWaits,averageWaitMs:rateLimiterWaits?Math.round(rateLimiterWaitMs/rateLimiterWaits):0},
+    liveState:{enabled:features.redisLiveState,writes:liveStateWrites,errors:liveStateWriteErrors,averageWriteMs:liveStateWrites?Math.round(liveStateWriteMs/liveStateWrites*10)/10:0} };
 }
 
 export async function closeRedis() {
