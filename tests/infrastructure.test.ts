@@ -129,6 +129,7 @@ test("Phase 2: PostgreSQL shadow reads validate payloads and fall back safely", 
   assert.equal(snapshot.readsOk,1);
   assert.equal(snapshot.readsFailed,1);
   assert.equal(snapshot.fallbacks,1);
+  assert.equal(snapshot.fallbackReasons.checksum,1);
   postgres.configurePostgresPoolForTest(null); overrideFeatureForTest("postgres",false);
 });
 
@@ -181,6 +182,13 @@ test("Control Room separates provider and BrainLive live latency", async () => {
   assert.equal(snapshot.attribution,"provider");
 });
 
+test("Control Room normalizes CPU against the assigned capacity", async () => {
+  const telemetry=await import("../src/telemetry");
+  const node=telemetry.telemetrySnapshot().node;
+  assert.equal(node.cpuPct>=0&&node.cpuPct<=100,true);
+  assert.equal(node.allocatedCpuCores>0,true);
+});
+
 test("Phase 1: admin sessions expire and old persisted sessions remain bounded", async () => {
   const { AdminSessionStore } = await import("../src/adminSessions");
   const file = path.join(process.cwd(),"data","admin-expiry-test.json");
@@ -206,7 +214,7 @@ test("Phase 1: the server becomes ready and exits cleanly on SIGTERM", { timeout
     cwd:process.cwd(), stdio:["ignore","pipe","pipe"], env:{...process.env,NODE_ENV:"test",PORT:String(port),
       REQUIRE_KEY:"false",REDIS_ENABLED:"false",POSTGRES_ENABLED:"false",ENABLE_POLLER:"false",ADMIN_PIN:"2468",
       ADMIN_SESSIONS_FILE:path.join("/tmp",`brainlive-admin-smoke-${port}.json`),ADMIN_LOGIN_RATE_LIMIT_MAX:"10",
-      TEST_ACTIVE_JOB_MS:"700",
+      TEST_ACTIVE_JOB_MS:"5000",
       ENABLE_BRAIN_LIVE_POLLER:"false",ENABLE_PREMATCH_SCHEDULER:"false",LINEUP_PRECOMPUTE_ENABLED:"false"},
   });
   let stderr=""; child.stderr?.on("data",(chunk)=>{stderr+=String(chunk);});

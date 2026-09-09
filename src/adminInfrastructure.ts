@@ -15,11 +15,25 @@ import { providerQueueSnapshot } from "./providerRateLimiter";
 import { lineupSchedulerSnapshot } from "./lineupScheduler";
 import { providerResilienceSnapshot } from "./providerResilience";
 import { livePipelineSnapshot } from "./livePipelineTelemetry";
+import { getApps } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 
 let cached: { at: number; value: any } | null = null;
+let firebaseUsersCached: {at:number;value:any}|null = null;
+
+async function firebaseUserCounts(){
+  if(firebaseUsersCached&&Date.now()-firebaseUsersCached.at<60_000)return firebaseUsersCached.value;
+  if(!getApps().length)return{available:false,registered:null,newToday:null,new7d:null,new30d:null};
+  try{
+    let pageToken:string|undefined;let registered=0,newToday=0,new7d=0,new30d=0;const now=Date.now();
+    do{const page=await getAuth().listUsers(1000,pageToken);for(const user of page.users){registered+=1;const created=Date.parse(user.metadata.creationTime);if(Number.isFinite(created)){const age=now-created;if(age<86400000)newToday+=1;if(age<7*86400000)new7d+=1;if(age<30*86400000)new30d+=1;}}pageToken=page.pageToken;}while(pageToken);
+    const value={available:true,registered,newToday,new7d,new30d};firebaseUsersCached={at:Date.now(),value};return value;
+  }catch{return{available:false,registered:null,newToday:null,new7d:null,new30d:null};}
+}
 
 async function userSnapshot() {
-  if (!postgresReady()) return { source: "unavailable", registered: null, newToday: null, new7d: null, new30d: null, premium: null, free: null, withFavorites: null, withNotifications: null, byPlatform: {} };
+  const firebase = await firebaseUserCounts();
+  if (!postgresReady()) return { source:firebase.available?"firebase":"unavailable",firebaseAvailable:firebase.available,registered:firebase.registered,newToday:firebase.newToday,new7d:firebase.new7d,new30d:firebase.new30d,premium:null,free:null,withFavorites:null,withNotifications:null,byPlatform:{} };
   try {
     const result = await query(`SELECT
       count(*)::int registered,
@@ -31,10 +45,12 @@ async function userSnapshot() {
       FROM app_users`);
     const platforms = await query("SELECT platform,count(*)::int count FROM app_users GROUP BY platform");
     const row = result.rows[0] ?? {};
-    return { source: "postgres", registered: row.registered, newToday: row.new_today, new7d: row.new_7d, new30d: row.new_30d,
-      premium: row.premium, free: Math.max(0, Number(row.registered)-Number(row.premium)), withFavorites: row.with_favorites,
+    const registered=firebase.available?firebase.registered:row.registered;
+    return { source:firebase.available?"firebase + postgres":"postgres", firebaseAvailable:firebase.available, databaseTracked:row.registered,
+      registered,newToday:firebase.available?firebase.newToday:row.new_today,new7d:firebase.available?firebase.new7d:row.new_7d,new30d:firebase.available?firebase.new30d:row.new_30d,
+      premium:row.premium,free:Math.max(0,Number(registered)-Number(row.premium)),withFavorites:row.with_favorites,
       withNotifications: null, byPlatform: Object.fromEntries(platforms.rows.map((p:any)=>[p.platform,p.count])) };
-  } catch { return { source: "postgres_error", registered: null }; }
+  } catch { return { source:firebase.available?"firebase + postgres_error":"postgres_error",firebaseAvailable:firebase.available,registered:firebase.registered,newToday:firebase.newToday,new7d:firebase.new7d,new30d:firebase.new30d,premium:null,free:null,withFavorites:null }; }
 }
 
 function alertSnapshot(input: { health: any; telemetry: any; redis: any; postgres: any; sse: any; providerResilience: any; notifications: any; queues: any }) {
@@ -111,7 +127,7 @@ export async function infrastructureDashboardSnapshot(stats?: any) {
       note: "Stima tecnica: nessuna API Railway Billing collegata.", assumptions: {
         railwayMemoryEurPerGbMonth: 10, railwayCpuEurPerVcpuMonth: 20, railwayEgressEurPerGb: .05,
       }, currentMonthEstimate: null, perActiveUserEstimate: null },
-    featureFlags: publicFeatureSnapshot(),
+    featureFlags: publicFeatureSnapshot(), security:{firebase:{configured:getApps().length>0,userDirectoryConnected:users.firebaseAvailable===true||users.source==="firebase",tokenVerification:publicFeatureSnapshot().firebaseTokenVerification?"enforced":"monitoring",premiumEnforcement:publicFeatureSnapshot().premiumEnforcement?"enforced":"compatibility",explanation:publicFeatureSnapshot().firebaseTokenVerification?"I token Firebase sono obbligatori sugli endpoint protetti.":"I token Firebase validi vengono verificati e registrati, ma gli endpoint compatibili non li rendono ancora obbligatori."}},
   };
   cached = { at: Date.now(), value }; return value;
 }

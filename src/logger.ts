@@ -45,7 +45,10 @@ export function log(
   const output = JSON.stringify(record);
   if (level === "error") recordOperationalError({
     service: String(record.service), module, errorCode: fields.errorCode == null ? null : String(fields.errorCode),
-    message, requestId: record.requestId, fixtureId: typeof fields.fixtureId === "number" ? fields.fixtureId : undefined,
+    message, requestId:record.requestId, fixtureId:typeof fields.fixtureId==="number"?fields.fixtureId:undefined,
+    endpoint:typeof fields.path==="string"?fields.path:undefined, method:typeof fields.method==="string"?fields.method:undefined,
+    status:typeof fields.status==="number"?fields.status:undefined, durationMs:typeof fields.durationMs==="number"?fields.durationMs:undefined,
+    stack:typeof fields.stack==="string"?fields.stack.slice(0,2000):undefined,
   });
   (level === "error" ? process.stderr : process.stdout).write(`${output}\n`);
 }

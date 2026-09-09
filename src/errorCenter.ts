@@ -2,14 +2,15 @@ type ErrorGroup = {
   fingerprint: string; service: string; module: string; errorCode: string | null;
   message: string; count: number; firstAt: string; lastAt: string;
   requestId?: string; fixtureId?: number;
+  endpoint?: string; method?: string; status?: number; durationMs?: number; stack?: string;
 };
 const groups = new Map<string, ErrorGroup>();
 
 export function recordOperationalError(input: Omit<ErrorGroup, "fingerprint"|"count"|"firstAt"|"lastAt">) {
-  const fingerprint = `${input.service}|${input.module}|${input.errorCode ?? ""}|${input.message}`.slice(0,600);
+  const fingerprint = `${input.service}|${input.module}|${input.errorCode??""}|${input.status??""}|${input.endpoint??""}|${input.message}`.slice(0,600);
   const now = new Date().toISOString();
   const current = groups.get(fingerprint);
-  groups.set(fingerprint, current ? { ...current, count: current.count + 1, lastAt: now, requestId: input.requestId ?? current.requestId, fixtureId: input.fixtureId ?? current.fixtureId }
+  groups.set(fingerprint, current ? { ...current, ...input, count:current.count+1, lastAt:now, firstAt:current.firstAt, fingerprint, requestId:input.requestId??current.requestId, fixtureId:input.fixtureId??current.fixtureId }
     : { ...input, fingerprint, count: 1, firstAt: now, lastAt: now });
   if (groups.size > 500) {
     const oldest = [...groups.entries()].sort((a,b)=>a[1].lastAt.localeCompare(b[1].lastAt)).slice(0, groups.size-500);

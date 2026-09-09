@@ -1,5 +1,6 @@
 import { PerformanceObserver, monitorEventLoopDelay } from "node:perf_hooks";
 import fs from "node:fs";
+import os from "node:os";
 
 type HttpSample = { at: number; path: string; method: string; status: number; durationMs: number; bytes: number };
 type MinuteBucket = {
@@ -19,6 +20,24 @@ let lastCpu = process.cpuUsage();
 let lastCpuAt = process.hrtime.bigint();
 const loop = monitorEventLoopDelay({ resolution: 20 });
 loop.enable();
+
+function allocatedCpuCores(): number {
+  const configured = Number(process.env.RAILWAY_CPU_LIMIT ?? process.env.CPU_LIMIT_CORES ?? "");
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  try {
+    const [quotaRaw, periodRaw] = fs.readFileSync("/sys/fs/cgroup/cpu.max", "utf8").trim().split(/\s+/);
+    if (quotaRaw !== "max") {
+      const value = Number(quotaRaw) / Number(periodRaw);
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+  } catch {}
+  try {
+    const quota = Number(fs.readFileSync("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "utf8"));
+    const period = Number(fs.readFileSync("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "utf8"));
+    if (quota > 0 && period > 0) return quota / period;
+  } catch {}
+  return Math.max(1, os.availableParallelism?.() ?? os.cpus().length);
+}
 
 try {
   new PerformanceObserver((list) => {
@@ -81,7 +100,9 @@ export function telemetrySnapshot() {
   const cpuNow = process.cpuUsage();
   const cpuAt = process.hrtime.bigint();
   const elapsedMicros = Math.max(1, Number(cpuAt - lastCpuAt) / 1000);
-  const cpuPct = Math.min(100 * (require("node:os").cpus()?.length ?? 1), ((cpuNow.user - lastCpu.user + cpuNow.system - lastCpu.system) / elapsedMicros) * 100);
+  const processCpuPct = Math.max(0, ((cpuNow.user-lastCpu.user+cpuNow.system-lastCpu.system)/elapsedMicros)*100);
+  const cpuCores = allocatedCpuCores();
+  const cpuPct = Math.min(100, processCpuPct / cpuCores);
   lastCpu = cpuNow;
   lastCpuAt = cpuAt;
   const handles = typeof (process as any)._getActiveHandles === "function" ? (process as any)._getActiveHandles().length : null;
@@ -101,7 +122,8 @@ export function telemetrySnapshot() {
       topEndpoints: [...byEndpoint.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([endpoint, requests]) => ({ endpoint, requests })),
     },
     node: {
-      cpuPct: Math.round(cpuPct * 10) / 10,
+      cpuPct: Math.round(cpuPct*10)/10, processCpuPct:Math.round(processCpuPct*10)/10,
+      allocatedCpuCores:Math.round(cpuCores*100)/100, cpuNormalization:"cgroup_quota_or_runtime_capacity",
       rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal,
       externalBytes: memory.external, uptimeSeconds: Math.round(process.uptime()), activeHandles: handles, fileDescriptors,
       eventLoopLagMeanMs: Number.isFinite(loop.mean) ? Math.round(loop.mean / 1e5) / 10 : 0,

@@ -7,7 +7,10 @@ type Source = { type: string; key: string; payload: unknown; version: number; so
 const latest = new Map<string, Source>();
 let writesOk = 0, writesFailed = 0, validations = 0;
 let readsOk = 0, readsMissed = 0, readsFailed = 0, fallbacks = 0;
+const fallbackReasons = { postgresUnavailable:0, documentMissing:0, schemaVersion:0, checksum:0, queryError:0 };
+const fallbackRecent: Array<{type:string;key:string;reason:string;at:string}> = [];
 const mismatches = new Map<string, { type: string; key: string; reason: string; detectedAt: string }>();
+function fallback(type:string,key:string,reason:keyof typeof fallbackReasons){fallbacks+=1;fallbackReasons[reason]+=1;fallbackRecent.push({type,key,reason,at:new Date().toISOString()});if(fallbackRecent.length>50)fallbackRecent.shift();}
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -17,13 +20,13 @@ function stable(value: unknown): string {
 function checksum(value: unknown) { return crypto.createHash("sha256").update(stable(value)).digest("hex"); }
 
 export async function readShadowDocument<T>(type: string, key: string, expectedVersion: number): Promise<T | null> {
-  if (!postgresReady()) { fallbacks += 1; return null; }
+  if (!postgresReady()) { fallback(type,key,"postgresUnavailable"); return null; }
   try {
     const result = await query("SELECT schema_version, checksum, payload FROM legacy_shadow_documents WHERE document_type=$1 AND document_key=$2", [type, key]);
     const row = result.rows[0];
-    if (!row) { readsMissed += 1; fallbacks += 1; return null; }
+    if (!row) { readsMissed += 1; fallback(type,key,"documentMissing"); return null; }
     if (Number(row.schema_version) !== expectedVersion || row.checksum !== checksum(row.payload)) {
-      readsFailed += 1; fallbacks += 1;
+      readsFailed += 1; fallback(type,key,Number(row.schema_version)!==expectedVersion?"schemaVersion":"checksum");
       mismatches.set(`${type}:${key}`, { type, key, reason: Number(row.schema_version) !== expectedVersion ? "schema_version" : "checksum", detectedAt: new Date().toISOString() });
       return null;
     }
@@ -31,21 +34,21 @@ export async function readShadowDocument<T>(type: string, key: string, expectedV
     mismatches.delete(`${type}:${key}`);
     return row.payload as T;
   } catch (error: any) {
-    readsFailed += 1; fallbacks += 1;
+    readsFailed += 1; fallback(type,key,"queryError");
     log("warn", "shadow-storage", "postgres read failed; using legacy JSON fallback", { module: type, errorCode: error?.code });
     return null;
   }
 }
 
 export async function readLatestShadowDocument<T>(type: string, expectedVersion: number): Promise<T | null> {
-  if (!postgresReady()) { fallbacks += 1; return null; }
+  if (!postgresReady()) { fallback(type,"latest","postgresUnavailable"); return null; }
   try {
     const result = await query("SELECT document_key, schema_version, checksum, payload FROM legacy_shadow_documents WHERE document_type=$1 ORDER BY source_updated_at DESC LIMIT 1", [type]);
     const row = result.rows[0];
-    if (!row) { readsMissed += 1; fallbacks += 1; return null; }
+    if (!row) { readsMissed += 1; fallback(type,"latest","documentMissing"); return null; }
     const key = String(row.document_key);
     if (Number(row.schema_version) !== expectedVersion || row.checksum !== checksum(row.payload)) {
-      readsFailed += 1; fallbacks += 1;
+      readsFailed += 1; fallback(type,key,Number(row.schema_version)!==expectedVersion?"schemaVersion":"checksum");
       mismatches.set(`${type}:${key}`, { type, key, reason: Number(row.schema_version) !== expectedVersion ? "schema_version" : "checksum", detectedAt: new Date().toISOString() });
       return null;
     }
@@ -53,7 +56,7 @@ export async function readLatestShadowDocument<T>(type: string, expectedVersion:
     mismatches.delete(`${type}:${key}`);
     return row.payload as T;
   } catch (error: any) {
-    readsFailed += 1; fallbacks += 1;
+    readsFailed += 1; fallback(type,"latest","queryError");
     log("warn", "shadow-storage", "latest postgres read failed; using legacy JSON fallback", { module: type, errorCode: error?.code });
     return null;
   }
@@ -95,8 +98,9 @@ export async function validateShadowStorage() {
   }
 }
 
-export function shadowStorageSnapshot() { return { enabled: features.postgresShadowWrite, writesOk, writesFailed, readsOk, readsMissed, readsFailed, fallbacks, validations, trackedDocuments: latest.size, mismatchCount: mismatches.size, mismatches: [...mismatches.values()].slice(0,100) }; }
+export function shadowStorageSnapshot() { return { enabled:features.postgresShadowWrite,writesOk,writesFailed,readsOk,readsMissed,readsFailed,fallbacks,fallbackReasons:{...fallbackReasons},fallbackRecent:[...fallbackRecent].reverse(),validations,trackedDocuments:latest.size,mismatchCount:mismatches.size,mismatches:[...mismatches.values()].slice(0,100) }; }
 export function resetShadowStorageForTest() {
   if (process.env.NODE_ENV !== "test") throw new Error("shadow_reset_test_only");
   latest.clear(); mismatches.clear(); writesOk = 0; writesFailed = 0; readsOk = 0; readsMissed = 0; readsFailed = 0; fallbacks = 0; validations = 0;
+  Object.keys(fallbackReasons).forEach((key)=>fallbackReasons[key as keyof typeof fallbackReasons]=0); fallbackRecent.length=0;
 }
