@@ -2,7 +2,7 @@ import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin
 import { getMessaging } from "firebase-admin/messaging";
 import { enqueueTask, QueuePriority } from "./priorityQueue";
 import { pushFailed, pushQueued, pushSent } from "./pushTelemetry";
-import { claimRedisOnce } from "./redisInfrastructure";
+import { claimRedisOnce, releaseRedisOnce } from "./redisInfrastructure";
 
 let enabled = false;
 const localClaims = new Map<string, number>();
@@ -15,6 +15,21 @@ async function claimPush(key: string, ttlSeconds: number) {
   if ((localClaims.get(key) ?? 0) > now) return false;
   localClaims.set(key, now + ttlSeconds * 1000);
   return true;
+}
+
+async function releasePushClaim(key: string) {
+  localClaims.delete(key);
+  await releaseRedisOnce(`push:${key}`);
+}
+
+async function sendClaimed(key: string, send: () => Promise<unknown>) {
+  try { await send(); }
+  catch (error) {
+    // Un errore FCM non deve trasformarsi in una notifica persa: rilasciamo
+    // il claim così il successivo ciclo può ritentare.
+    await releasePushClaim(key);
+    throw error;
+  }
 }
 
 function configuredCredential() {
@@ -92,9 +107,10 @@ export async function sendBrainLivePush(
   awayName: string,
 ) {
   if (!enabled) return;
-  if (!await claimPush(`brain-live:${fixtureId}`, 36 * 60 * 60)) return;
+  const claimKey = `brain-live:${fixtureId}`;
+  if (!await claimPush(claimKey, 36 * 60 * 60)) return;
   queueAutomaticPush("critical", `brain-live-${fixtureId}`, async () => {
-    await getMessaging().send({
+    await sendClaimed(claimKey, () => getMessaging().send({
       topic: "brainlive_brain_live",
       notification: {
         title: "🧠 Il Cervello ha trovato un match LIVE",
@@ -109,16 +125,17 @@ export async function sendBrainLivePush(
         payload: { aps: { sound: "default" } },
         headers: { "apns-priority": "10" },
       },
-    });
+    }));
   });
 }
 
 export async function sendBrainPrematchPush(count: number) {
   if (!enabled || count <= 0) return;
   const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Rome" }).format(new Date());
-  if (!await claimPush(`brain-prematch:${day}`, 36 * 60 * 60)) return;
+  const claimKey = `brain-prematch:${day}`;
+  if (!await claimPush(claimKey, 36 * 60 * 60)) return;
   queueAutomaticPush("normal", "brain-prematch", async () => {
-    await getMessaging().send({
+    await sendClaimed(claimKey, () => getMessaging().send({
       topic: "brainlive_brain_prematch",
       notification: {
         title: "🧠 Il Cervello ha completato le analisi",
@@ -135,7 +152,7 @@ export async function sendBrainPrematchPush(count: number) {
         payload: { aps: { sound: "default" } },
         headers: { "apns-priority": "10" },
       },
-    });
+    }));
   });
 }
 
@@ -149,7 +166,8 @@ export async function sendFixturePush(
   if (!enabled) return;
   const eventKey = extra.eventId?.trim() || extra.eventKey?.trim() ||
     `${type}:${extra.score ?? ""}:${extra.elapsed ?? ""}:${extra.teamId ?? ""}`;
-  if (!await claimPush(`fixture:${fixtureId}:${eventKey}`, 36 * 60 * 60)) return;
+  const claimKey = `fixture:${fixtureId}:${eventKey}`;
+  if (!await claimPush(claimKey, 36 * 60 * 60)) return;
   const topic = `brainlive_fixture_${fixtureId}_${type}`;
   const imageUrl = extra.imageUrl?.trim();
   const richImage = extra.matchupImageUrl?.trim() || imageUrl;
@@ -157,7 +175,7 @@ export async function sendFixturePush(
     ? "critical"
     : "normal";
   queueAutomaticPush(priority, topic, async () => {
-    await getMessaging().send({
+    await sendClaimed(claimKey, () => getMessaging().send({
       topic,
       notification: { title, body },
       data: { fixtureId: String(fixtureId), type, title, body, ...extra },
@@ -174,6 +192,6 @@ export async function sendFixturePush(
         headers: { "apns-priority": "10" },
         ...(richImage ? { fcmOptions: { imageUrl: richImage } } : {}),
       },
-    });
+    }));
   });
 }

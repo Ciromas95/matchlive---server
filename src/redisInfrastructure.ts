@@ -144,6 +144,12 @@ export async function claimRedisOnce(name: string, ttlSeconds: number): Promise<
   }
 }
 
+export async function releaseRedisOnce(name: string): Promise<void> {
+  if (!redisReady()) return;
+  try { await client!.del(key(`once:${name}`)); }
+  catch { errors += 1; }
+}
+
 /**
  * Cross-instance single flight. The lock owner fills the cache; followers wait
  * briefly for that value. If the owner dies or Redis is unavailable, the
