@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { shadowWriteDocument } from "./shadowStorage";
+import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
+import { features } from "./featureFlags";
 
 type PickRecord = {
   fixtureId: number;
@@ -49,6 +50,10 @@ if (process.env.RAILWAY_ENVIRONMENT && !railwayVolumePath && !configuredStorePat
 let queue: Promise<unknown> = Promise.resolve();
 
 async function readStore(): Promise<Store> {
+  if (features.postgresReadPrematch) {
+    const stored = await readShadowDocument<Store>("prematch_performance", "current", 3);
+    if (stored?.version === 3 && stored.picks) return stored;
+  }
   try {
     const raw = await fs.readFile(storePath, "utf8");
     const parsed = JSON.parse(raw);

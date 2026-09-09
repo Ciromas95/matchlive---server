@@ -2,7 +2,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import * as api from "./apiFootball";
 import { runOnce } from "./inflight";
-import { shadowWriteDocument } from "./shadowStorage";
+import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
+import { features } from "./featureFlags";
 
 export type LineupStatus = "predicted" | "official" | "unavailable";
 
@@ -94,6 +95,13 @@ const isDecisiveRound = (round: string) =>
 async function readStore(): Promise<Store> {
   if (storeMemory) return storeMemory;
   storeLoad ??= (async () => {
+    if (features.postgresReadLineup) {
+      const stored = await readShadowDocument<Store>("lineup_predictions", "current", 1);
+      if (stored?.version === 1 && stored.fixtures) {
+        storeMemory = stored;
+        return storeMemory;
+      }
+    }
     try {
       const parsed = JSON.parse(await fs.readFile(storePath, "utf8"));
       storeMemory = parsed?.version === 1 && parsed?.fixtures

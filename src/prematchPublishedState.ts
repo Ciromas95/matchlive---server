@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { shadowWriteDocument } from "./shadowStorage";
+import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
+import { features } from "./featureFlags";
 
 type PublishedPrematchState = {
   version: 2;
@@ -16,6 +17,10 @@ const statePath = path.resolve(
 );
 
 export async function loadPublishedPrematchDay(date: string) {
+  if (features.postgresReadPrematch) {
+    const stored = await readShadowDocument<{ picks: any[]; candidates: never[] }>("prematch_publications", date, 2);
+    if (stored && Array.isArray(stored.picks)) return stored;
+  }
   try {
     const parsed = JSON.parse(await fs.readFile(statePath, "utf8")) as PublishedPrematchState;
     if (parsed?.version !== 2) return null;

@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { shadowWriteDocument } from "./shadowStorage";
+import { readLatestShadowDocument, shadowWriteDocument } from "./shadowStorage";
+import { features } from "./featureFlags";
 
 export type PrematchScanReport = {
   algorithmVersion: string;
@@ -51,6 +52,10 @@ export async function savePrematchScanReport(report: PrematchScanReport) {
 
 export async function getLatestPrematchScanReport(): Promise<PrematchScanReport | null> {
   if (latest) return latest;
+  if (features.postgresReadPrematch) {
+    const stored = await readLatestShadowDocument<PrematchScanReport>("prematch_scan", 1);
+    if (stored?.date) { latest = stored; return latest; }
+  }
   try {
     latest = JSON.parse(await fs.readFile(file, "utf8")) as PrematchScanReport;
   } catch {}

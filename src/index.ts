@@ -21,7 +21,7 @@ import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
 import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
-import { getLiveStateSnapshot, hasLiveState } from "./liveState";
+import { getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres } from "./liveState";
 import { priorityQueueSnapshot } from "./priorityQueue";
 import { providerQueueSnapshot } from "./providerRateLimiter";
 import { requestContext } from "./logger";
@@ -634,6 +634,7 @@ installGracefulShutdown(server);
 
 async function bootstrap() {
   await Promise.allSettled([initializeRedis(), initializePostgres()]);
+  await hydrateLiveStateFromPostgres();
   if (process.env.ENABLE_POLLER !== "false") {
     const stop = startPoller();
     registerStopTask("live-poller", stop);

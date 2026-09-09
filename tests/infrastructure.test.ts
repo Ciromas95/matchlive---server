@@ -102,6 +102,36 @@ test("Phase 1: shadow validation reports a checksum mismatch without changing th
   postgres.configurePostgresPoolForTest(null); overrideFeatureForTest("postgres",false); overrideFeatureForTest("postgresShadowWrite",false);
 });
 
+test("Phase 2: PostgreSQL shadow reads validate payloads and fall back safely", async () => {
+  const { overrideFeatureForTest } = await import("../src/featureFlags");
+  const postgres = await import("../src/postgresInfrastructure");
+  const shadow = await import("../src/shadowStorage");
+  const crypto = await import("node:crypto");
+  shadow.resetShadowStorageForTest();
+  const payload = { version: 2, picks: [{ fixtureId: 42 }] };
+  const stable = (value: any): string => Array.isArray(value)
+    ? `[${value.map(stable).join(",")}]`
+    : value && typeof value === "object"
+      ? `{${Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${JSON.stringify(k)}:${stable(v)}`).join(",")}}`
+      : JSON.stringify(value);
+  const validChecksum = crypto.createHash("sha256").update(stable(payload)).digest("hex");
+  let valid = true;
+  const fakePool = { totalCount:1,idleCount:1,waitingCount:0,
+    query: async (sql:string) => sql.includes("legacy_shadow_documents")
+      ? { rows:[{ schema_version:2, checksum: valid ? validChecksum : "invalid", payload }] }
+      : { rows:[] }, end:async()=>undefined };
+  overrideFeatureForTest("postgres",true);
+  postgres.configurePostgresPoolForTest(fakePool);
+  assert.deepEqual(await shadow.readShadowDocument("prematch_publications","2026-09-09",2),payload);
+  valid = false;
+  assert.equal(await shadow.readShadowDocument("prematch_publications","2026-09-09",2),null);
+  const snapshot = shadow.shadowStorageSnapshot();
+  assert.equal(snapshot.readsOk,1);
+  assert.equal(snapshot.readsFailed,1);
+  assert.equal(snapshot.fallbacks,1);
+  postgres.configurePostgresPoolForTest(null); overrideFeatureForTest("postgres",false);
+});
+
 test("Phase 1: provider retries transient failures and opens its circuit", async () => {
   const resilience = await import("../src/providerResilience");
   const previous = { retries:process.env.PROVIDER_MAX_RETRIES, base:process.env.PROVIDER_RETRY_BASE_MS, threshold:process.env.PROVIDER_CIRCUIT_FAILURE_THRESHOLD };

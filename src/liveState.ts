@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { features } from "./featureFlags";
 import { setRedisJson } from "./redisInfrastructure";
-import { shadowWriteDocument } from "./shadowStorage";
+import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
 
 export type LiveStateDelta = {
   type: "live_delta";
@@ -80,6 +80,23 @@ function schedulePersist() {
 }
 
 restoreFromDisk();
+
+export async function hydrateLiveStateFromPostgres() {
+  if (!features.postgresReadLive) return false;
+  const saved = await readShadowDocument<any>("live_state", "current", 1);
+  const savedAt = Date.parse(String(saved?.updatedAt ?? ""));
+  if (!saved || !Number.isFinite(savedAt) || Date.now() - savedAt > 2 * 60_000) return false;
+  compactByFixture.clear();
+  for (const row of Array.isArray(saved.fixtures) ? saved.fixtures : []) {
+    const id = Number(row?.fixtureId ?? 0);
+    if (id > 0) compactByFixture.set(id, row);
+  }
+  rawFixtures = Array.isArray(saved.rawFixtures) ? saved.rawFixtures : [];
+  revision = Number(saved.revision ?? 0);
+  updatedAt = new Date(savedAt).toISOString();
+  rememberGlobals();
+  return true;
+}
 
 function fixtureId(row: any): number {
   return Number(row?.fixtureId ?? 0);

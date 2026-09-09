@@ -1,8 +1,9 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { LiveObservationV4 } from "./liveStrategyV4";
-import { shadowWriteDocument } from "./shadowStorage";
+import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
 import { setRedisJson } from "./redisInfrastructure";
+import { features } from "./featureFlags";
 
 export type PersistedBrainLiveState = {
   version: 1;
@@ -25,6 +26,13 @@ const statePath = path.resolve(
 let saveQueue: Promise<void> = Promise.resolve();
 
 export async function loadBrainLiveState(): Promise<PersistedBrainLiveState | null> {
+  if (features.postgresReadLive) {
+    const stored = await readShadowDocument<PersistedBrainLiveState>("brain_live_state", "current", 1);
+    if (stored?.version === 1) {
+      const age = Date.now() - new Date(stored.savedAt ?? 0).getTime();
+      if (Number.isFinite(age) && age <= 18 * 60 * 60 * 1000) return stored;
+    }
+  }
   try {
     const parsed = JSON.parse(await fs.readFile(statePath, "utf8"));
     if (parsed?.version !== 1) return null;
