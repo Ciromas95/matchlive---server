@@ -6,7 +6,7 @@ import { markHealthActivity } from "./health";
 import { pruneRedCardsLive, updateRedCardsFromFixture } from "./redCardsLive";
 import { sendFixturePush } from "./push";
 import { publishLiveState } from "./liveState";
-import { completeLiveCycle, livePipelineSnapshot } from "./livePipelineTelemetry";
+import { completeLiveCycle } from "./livePipelineTelemetry";
 import { detectScoreCorrection } from "./scoreCorrection";
 
 const lastScore = new Map<number, string>();
@@ -283,10 +283,7 @@ export function startPoller() {
       await publishLiveState(data);
       markHealthActivity("ingestion");
       await checkFinishedFixtures(liveIds);
-      const pipeline = livePipelineSnapshot();
-      completeLiveCycle({ processingMs,
-        redisPublishMs:Number(pipeline.stages.redisPublish.lastMs??0), sseSendMs:Number(pipeline.stages.sseSend.lastMs??0),
-        fixtures:liveCount });
+      completeLiveCycle({ processingMs, fixtures: liveCount });
 
       // Poll dinamico coerente con la cache TTL live (ms)
       const nextMs = Math.max(4_000, liveTtlMs(liveCount));

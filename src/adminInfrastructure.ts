@@ -15,6 +15,7 @@ import { providerQueueSnapshot } from "./providerRateLimiter";
 import { lineupSchedulerSnapshot } from "./lineupScheduler";
 import { providerResilienceSnapshot } from "./providerResilience";
 import { livePipelineSnapshot } from "./livePipelineTelemetry";
+import { clientLiveTelemetrySnapshot } from "./clientLiveTelemetry";
 import { getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 
@@ -92,7 +93,10 @@ export async function infrastructureDashboardSnapshot(stats?: any) {
   const shadow = shadowStorageSnapshot();
   const providerResilience = providerResilienceSnapshot();
   const notifications = pushTelemetrySnapshot();
-  const livePipeline = livePipelineSnapshot();
+  const livePipeline = {
+    ...livePipelineSnapshot(),
+    clients: clientLiveTelemetrySnapshot(),
+  };
   const queues = { notifications: priorityQueueSnapshot(), provider: providerQueueSnapshot() };
   const provider = stats?.provider ?? {};
   const readable = stats?.readable ?? {};

@@ -176,10 +176,14 @@ test("Control Room separates provider and BrainLive live latency", async () => {
   const live = await import("../src/livePipelineTelemetry");
   live.resetLivePipelineTelemetryForTest();
   live.recordLiveProvider(12,88); live.recordLiveRedis(4); live.recordLiveSse(2);
-  live.completeLiveCycle({processingMs:20,redisPublishMs:4,sseSendMs:2,fixtures:7});
+  live.completeLiveCycle({processingMs:20,fixtures:7});
   const snapshot=live.livePipelineSnapshot();
   assert.equal(snapshot.latest.providerDelayMs,100); assert.equal(snapshot.latest.internalLatencyMs,26);
   assert.equal(snapshot.attribution,"provider");
+  assert.ok(snapshot.latest.providerRequestStartedAt);
+  assert.ok(snapshot.latest.providerResponseReceivedAt);
+  assert.ok(snapshot.latest.redisPublishedAt);
+  assert.ok(snapshot.latest.ssePublishedAt);
 });
 
 test("Control Room normalizes CPU against the assigned capacity", async () => {

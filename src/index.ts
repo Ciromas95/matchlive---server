@@ -37,6 +37,7 @@ import { loadOperationalMetricHistory, persistOperationalMetrics } from "./metri
 import crypto from "node:crypto";
 import { auditAdmin } from "./adminAudit";
 import { postgresReady, query as postgresQuery } from "./postgresInfrastructure";
+import { recordClientLiveTelemetry } from "./clientLiveTelemetry";
 import { startLineupScheduler } from "./lineupScheduler";
 import { inferCompetitionFormat } from "./competitionFormat";
 
@@ -221,6 +222,11 @@ app.use("/api", (req: Request, _res: Response, next: NextFunction) => {
 });
 
 app.use("/api", rateLimitApi);
+
+app.post("/api/telemetry/live-client", (req: Request, res: Response) => {
+  recordClientLiveTelemetry(req.body);
+  return res.status(204).end();
+});
 
 app.get("/api/provider", async (req: Request, res: Response) => {
   const path = String(req.query.path ?? "").trim();
