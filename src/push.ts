@@ -2,8 +2,20 @@ import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin
 import { getMessaging } from "firebase-admin/messaging";
 import { enqueueTask, QueuePriority } from "./priorityQueue";
 import { pushFailed, pushQueued, pushSent } from "./pushTelemetry";
+import { claimRedisOnce } from "./redisInfrastructure";
 
 let enabled = false;
+const localClaims = new Map<string, number>();
+
+async function claimPush(key: string, ttlSeconds: number) {
+  const shared = await claimRedisOnce(`push:${key}`, ttlSeconds);
+  if (shared != null) return shared;
+  const now = Date.now();
+  for (const [name, expiry] of localClaims) if (expiry <= now) localClaims.delete(name);
+  if ((localClaims.get(key) ?? 0) > now) return false;
+  localClaims.set(key, now + ttlSeconds * 1000);
+  return true;
+}
 
 function configuredCredential() {
   for (const rawValue of [
@@ -80,6 +92,7 @@ export async function sendBrainLivePush(
   awayName: string,
 ) {
   if (!enabled) return;
+  if (!await claimPush(`brain-live:${fixtureId}`, 36 * 60 * 60)) return;
   queueAutomaticPush("critical", `brain-live-${fixtureId}`, async () => {
     await getMessaging().send({
       topic: "brainlive_brain_live",
@@ -102,6 +115,8 @@ export async function sendBrainLivePush(
 
 export async function sendBrainPrematchPush(count: number) {
   if (!enabled || count <= 0) return;
+  const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Rome" }).format(new Date());
+  if (!await claimPush(`brain-prematch:${day}`, 36 * 60 * 60)) return;
   queueAutomaticPush("normal", "brain-prematch", async () => {
     await getMessaging().send({
       topic: "brainlive_brain_prematch",
@@ -132,6 +147,9 @@ export async function sendFixturePush(
   extra: Record<string, string> = {},
 ) {
   if (!enabled) return;
+  const eventKey = extra.eventId?.trim() || extra.eventKey?.trim() ||
+    `${type}:${extra.score ?? ""}:${extra.elapsed ?? ""}:${extra.teamId ?? ""}`;
+  if (!await claimPush(`fixture:${fixtureId}:${eventKey}`, 36 * 60 * 60)) return;
   const topic = `brainlive_fixture_${fixtureId}_${type}`;
   const imageUrl = extra.imageUrl?.trim();
   const richImage = extra.matchupImageUrl?.trim() || imageUrl;

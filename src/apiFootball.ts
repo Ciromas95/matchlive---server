@@ -505,6 +505,12 @@ export async function getStandingsCached(
   });
 }
 
+export async function getLeagueSeasonFixturesCached(leagueId: number, season: number): Promise<any> {
+  return fetchWithCache<any>(`leagueSeasonFixtures_${leagueId}_${season}`, 15 * 60, async () =>
+    apiGet("/fixtures", "compact", { league: leagueId, season }),
+  );
+}
+
 export async function getFixtureEventsCached(
   fixtureId: number,
   type: CounterKey = "events",

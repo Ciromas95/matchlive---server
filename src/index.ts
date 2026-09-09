@@ -38,6 +38,7 @@ import crypto from "node:crypto";
 import { auditAdmin } from "./adminAudit";
 import { postgresReady, query as postgresQuery } from "./postgresInfrastructure";
 import { startLineupScheduler } from "./lineupScheduler";
+import { inferCompetitionFormat } from "./competitionFormat";
 
 dotenv.config();
 
@@ -533,6 +534,23 @@ app.get("/api/standings", async (req: Request, res: Response) => {
     return res.status(status && status >= 400 ? status : 502).json({
       error: "Standings unavailable",
     });
+  }
+});
+app.get("/api/competition/format", async (req: Request, res: Response) => {
+  const leagueId = Number(req.query.leagueId);
+  const season = Number(req.query.season);
+  if (!Number.isInteger(leagueId) || leagueId <= 0 || !Number.isInteger(season)) {
+    return res.status(400).json({ error: "Missing or invalid leagueId/season" });
+  }
+  try {
+    const [standings, fixtures] = await Promise.all([
+      apiFootball.getStandingsCached(leagueId, season).catch(() => ({ response: [] })),
+      apiFootball.getLeagueSeasonFixturesCached(leagueId, season),
+    ]);
+    setSharedCache(res, 60);
+    return res.json({ leagueId, season, ...inferCompetitionFormat(leagueId, season, standings, fixtures) });
+  } catch {
+    return res.status(502).json({ error: "Competition format unavailable" });
   }
 });
 app.get("/api/fixtures/final", async (req: Request, res: Response) => {

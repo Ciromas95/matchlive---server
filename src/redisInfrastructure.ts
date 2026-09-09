@@ -128,6 +128,22 @@ export async function releaseRedisLock(lock: RedisLock): Promise<void> {
 
 export function redisLocksReady() { return features.redisLock && redisReady(); }
 
+/// Deduplica durevole cross-instance per eventi one-shot (push, alert, job).
+export async function claimRedisOnce(name: string, ttlSeconds: number): Promise<boolean | null> {
+  if (!redisReady()) return null;
+  try {
+    const result = await client!.set(key(`once:${name}`), String(Date.now()), {
+      NX: true,
+      EX: Math.max(1, ttlSeconds),
+    });
+    return result === "OK";
+  } catch (error: any) {
+    errors += 1;
+    lastError = error?.message ?? String(error);
+    return null;
+  }
+}
+
 /**
  * Cross-instance single flight. The lock owner fills the cache; followers wait
  * briefly for that value. If the owner dies or Redis is unavailable, the
