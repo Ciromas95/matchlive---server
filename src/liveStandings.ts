@@ -79,6 +79,7 @@ function applyFixture(row: any, venue: "home" | "away", goalsFor: number, goalsA
     provisional: true,
     fixtureId: numberValue(fixture?.fixture?.id),
     status: fixtureStatus(fixture),
+    outcome: goalsFor > goalsAgainst ? "winning" : goalsFor < goalsAgainst ? "losing" : "drawing",
   };
 }
 

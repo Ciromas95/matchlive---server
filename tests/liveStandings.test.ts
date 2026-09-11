@@ -19,7 +19,18 @@ test("ricalcola atomicamente punti, reti e posizioni di più match live", () => 
   assert.deepEqual(rows.map((value: any) => value.team.id), [2, 3, 1, 4]);
   assert.equal(rows.find((value: any) => value.team.id === 2).points, 22);
   assert.equal(rows.find((value: any) => value.team.id === 3).all.goals.for, 15);
+  assert.equal(rows.find((value: any) => value.team.id === 2)._brainLive.outcome, "winning");
+  assert.equal(rows.find((value: any) => value.team.id === 1)._brainLive.outcome, "losing");
   assert.equal(projected._brainLive.provisional, true);
+});
+
+test("marca entrambe le squadre in grigio logico quando stanno pareggiando", () => {
+  resetLiveStandingsForTests();
+  const official = { response: [{ league: { standings: [[row(1, 1, 20, 15, 8), row(2, 2, 19, 14, 8)]] } }] };
+  const projected = projectLiveStandings(official, [fixture(106, 1, 2, 1, 1)], 135, 2026);
+  const rows = projected.response[0].league.standings[0];
+  assert.equal(rows.find((value: any) => value.team.id === 1)._brainLive.outcome, "drawing");
+  assert.equal(rows.find((value: any) => value.team.id === 2)._brainLive.outcome, "drawing");
 });
 
 test("una partita sospesa non modifica la classifica", () => {
