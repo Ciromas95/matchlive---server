@@ -1,4 +1,4 @@
-import { getFixtureById, getLiveFixtures } from "./apiFootball";
+import { getFixtureById, getLiveFixtures, getStandingsCached } from "./apiFootball";
 import { broadcast } from "./stream";
 import { liveTtlMs } from "./ttl";
 import { canStartJobs, trackJob } from "./lifecycle";
@@ -8,6 +8,11 @@ import { sendFixturePush } from "./push";
 import { publishLiveState } from "./liveState";
 import { completeLiveCycle } from "./livePipelineTelemetry";
 import { detectScoreCorrection } from "./scoreCorrection";
+import {
+  primeLiveStandingsBaselines,
+  rememberCompletedStandingsFixture,
+  removeLiveStandingsFixture,
+} from "./liveStandings";
 
 const lastScore = new Map<number, string>();
 
@@ -133,7 +138,8 @@ async function checkFinishedFixtures(liveIds: Set<number>) {
     const raw = await getFixtureById(fixtureId).catch(() => null);
     const fixture = raw?.response?.[0];
     const status = String(fixture?.fixture?.status?.short ?? "").toUpperCase();
-    if (["FT", "AET", "PEN"].includes(status)) {
+    if (["FT", "AET", "PEN", "PEN_FT"].includes(status)) {
+      rememberCompletedStandingsFixture(fixture);
       const score = `${fixture?.goals?.home ?? 0}-${fixture?.goals?.away ?? 0}`;
       await sendFixturePush(
         fixtureId,
@@ -150,6 +156,11 @@ async function checkFinishedFixtures(liveIds: Set<number>) {
         },
       );
       trackedLive.delete(fixtureId);
+    } else if (status && !["1H", "HT", "2H", "ET", "BT", "P", "PEN_LIVE", "LIVE"].includes(status)) {
+      // Sospesa, interrotta, abbandonata, rinviata o cancellata: la sua
+      // proiezione deve sparire senza alterare punti e reti ufficiali.
+      removeLiveStandingsFixture(fixtureId);
+      if (tracked.missing >= 5) trackedLive.delete(fixtureId);
     } else if (tracked.missing >= 5) {
       trackedLive.delete(fixtureId);
     }
@@ -173,6 +184,9 @@ export function startPoller() {
       const processingStarted = performance.now();
       const fixtures = Array.isArray(data?.response) ? data.response : [];
       const liveCount = fixtures.length;
+      void primeLiveStandingsBaselines(fixtures, getStandingsCached).catch((error: any) => {
+        console.warn("[liveStandings] baseline non disponibile:", error?.message ?? error);
+      });
 
       // per pulizia lastScore + redcards
       const liveIds = new Set<number>();

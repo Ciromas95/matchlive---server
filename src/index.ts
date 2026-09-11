@@ -21,7 +21,8 @@ import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
 import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
-import { getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres } from "./liveState";
+import { getLiveRawFixtures, getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres } from "./liveState";
+import { projectLiveStandings } from "./liveStandings";
 import { priorityQueueSnapshot } from "./priorityQueue";
 import { providerQueueSnapshot } from "./providerRateLimiter";
 import { requestContext } from "./logger";
@@ -530,11 +531,10 @@ app.get("/api/standings", async (req: Request, res: Response) => {
   }
   try {
     const data = await apiFootball.getStandingsCached(leagueId, season);
-    res.setHeader(
-      "Cache-Control",
-      "public, max-age=60, s-maxage=3600, stale-while-revalidate=300",
-    );
-    return res.json(data);
+    // Il dato ufficiale resta condiviso nella cache provider; la proiezione
+    // LIVE viene invece composta al momento e non deve essere congelata da CDN.
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.json(projectLiveStandings(data, getLiveRawFixtures(), leagueId, season));
   } catch (error: any) {
     const status = error?.response?.status;
     return res.status(status && status >= 400 ? status : 502).json({
