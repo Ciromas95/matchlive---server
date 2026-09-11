@@ -69,7 +69,7 @@ function updateBlock(block: any, goalsFor: number, goalsAgainst: number) {
   block.goals.against = numberValue(block.goals.against) + goalsAgainst;
 }
 
-function applyFixture(row: any, venue: "home" | "away", goalsFor: number, goalsAgainst: number, fixture: any) {
+function applyFixture(row: any, venue: "home" | "away", goalsFor: number, goalsAgainst: number, fixture: any, live: boolean) {
   updateBlock(row.all, goalsFor, goalsAgainst);
   updateBlock(row[venue], goalsFor, goalsAgainst);
   row.points = numberValue(row.points) + pointsFor(goalsFor, goalsAgainst);
@@ -77,6 +77,8 @@ function applyFixture(row: any, venue: "home" | "away", goalsFor: number, goalsA
   row.goalsDiff = numberValue(row?.all?.goals?.for) - numberValue(row?.all?.goals?.against);
   row._brainLive = {
     provisional: true,
+    live,
+    settlementPending: !live,
     fixtureId: numberValue(fixture?.fixture?.id),
     status: fixtureStatus(fixture),
     outcome: goalsFor > goalsAgainst ? "winning" : goalsFor < goalsAgainst ? "losing" : "drawing",
@@ -225,6 +227,8 @@ export function projectLiveStandings(
   }
   const candidates = [...candidateById.values()];
   const projectedFixtureIds: number[] = [];
+  const activeFixtureIds: number[] = [];
+  const settledFixtureIds: number[] = [];
   const projectedTeamIds = new Set<number>();
 
   for (const fixture of candidates) {
@@ -267,9 +271,10 @@ export function projectLiveStandings(
       continue;
     }
 
-    applyFixture(homeRow, "home", homeGoals, awayGoals, fixture);
-    applyFixture(awayRow, "away", awayGoals, homeGoals, fixture);
+    applyFixture(homeRow, "home", homeGoals, awayGoals, fixture, isActive);
+    applyFixture(awayRow, "away", awayGoals, homeGoals, fixture, isActive);
     projectedFixtureIds.push(id);
+    (isActive ? activeFixtureIds : settledFixtureIds).push(id);
     projectedTeamIds.add(homeId);
     projectedTeamIds.add(awayId);
   }
@@ -287,7 +292,11 @@ export function projectLiveStandings(
   }
   clone._brainLive = {
     provisional: projectedFixtureIds.length > 0,
+    live: activeFixtureIds.length > 0,
+    settlementPending: settledFixtureIds.length > 0,
     fixtureIds: projectedFixtureIds,
+    activeFixtureIds,
+    settledFixtureIds,
     teamIds: [...projectedTeamIds],
     updatedAt: new Date().toISOString(),
   };

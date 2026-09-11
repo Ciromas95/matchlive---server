@@ -22,6 +22,7 @@ test("ricalcola atomicamente punti, reti e posizioni di più match live", () => 
   assert.equal(rows.find((value: any) => value.team.id === 2)._brainLive.outcome, "winning");
   assert.equal(rows.find((value: any) => value.team.id === 1)._brainLive.outcome, "losing");
   assert.equal(projected._brainLive.provisional, true);
+  assert.equal(projected._brainLive.live, true);
 });
 
 test("marca entrambe le squadre in grigio logico quando stanno pareggiando", () => {
@@ -40,6 +41,7 @@ test("una partita sospesa non modifica la classifica", () => {
   const projected = projectLiveStandings(official, [fixture(103, 1, 2, 2, 0, "SUSP")], 135, 2026);
   assert.equal(projected.response[0].league.standings[0][0].points, 20);
   assert.equal(projected._brainLive.provisional, false);
+  assert.equal(projected._brainLive.live, false);
 });
 
 test("mantiene il finale già proiettato finché il provider non lo assorbe", () => {
@@ -49,6 +51,9 @@ test("mantiene il finale già proiettato finché il provider non lo assorbe", ()
   rememberCompletedStandingsFixture(fixture(104, 1, 2, 1, 0, "FT"));
   const pending = projectLiveStandings(official, [], 135, 2026);
   assert.equal(pending.response[0].league.standings[0].find((value: any) => value.team.id === 1).points, 23);
+  assert.equal(pending._brainLive.live, false);
+  assert.equal(pending._brainLive.settlementPending, true);
+  assert.equal(pending.response[0].league.standings[0].find((value: any) => value.team.id === 1)._brainLive.live, false);
 
   const absorbedOfficial = { response: [{ league: { standings: [[row(1, 1, 23, 16, 8), row(2, 2, 19, 14, 9)]] } }] };
   for (const value of absorbedOfficial.response[0].league.standings[0]) value.all.played = 11;
@@ -68,4 +73,5 @@ test("conserva il finale anche se nessuno ha aperto la classifica durante il liv
   const projected = projectLiveStandings(official, [], 135, 2026);
   assert.equal(projected.response[0].league.standings[0].find((value: any) => value.team.id === 1).points, 23);
   assert.equal(projected._brainLive.provisional, true);
+  assert.equal(projected._brainLive.live, false);
 });
