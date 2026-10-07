@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { getFixtureEventsCached, getLeagueFixturesByDate } from "../apiFootball";
 import { toLeagueFixturesCompact } from "../compact";
+import { normalizeFixtureStatus } from "../fixtureLifecycle";
 
 const router = Router();
 
@@ -22,13 +23,16 @@ router.get("/compact", async (req: Request, res: Response) => {
     // ormai concluse recuperiamo il referto ufficiale una sola volta e lo
     // conserviamo a lungo nella cache condivisa: così i rossi restano visibili
     // anche nei giorni successivi senza moltiplicare le chiamate per utente.
-    const historicalStatuses = new Set(["FT", "AET", "PEN", "ABD", "SUSP"]);
     const enriched = [...rawFixtures];
     for (let start = 0; start < enriched.length; start += 5) {
       await Promise.all(enriched.slice(start, start + 5).map(async (fixture, offset) => {
-        const status = String(fixture?.fixture?.status?.short ?? "").toUpperCase();
+        const lifecycle = normalizeFixtureStatus(fixture?.fixture?.status);
         const fixtureId = Number(fixture?.fixture?.id ?? 0);
-        if (!historicalStatuses.has(status) || !fixtureId) return;
+        const needsHistoricalEvents =
+          lifecycle.isFinished ||
+          lifecycle.lifecycleState === "abandoned" ||
+          lifecycle.lifecycleState === "suspended";
+        if (!needsHistoricalEvents || !fixtureId) return;
         try {
           const eventData = await getFixtureEventsCached(fixtureId, "events", 24 * 60 * 60);
           const events = Array.isArray(eventData?.response) ? eventData.response : [];

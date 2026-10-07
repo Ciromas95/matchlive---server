@@ -14,10 +14,9 @@ import {
   StrategyInputV2,
   TeamStatsV2,
 } from "./prematchStrategyV2";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 const BASE_URL = "https://v3.football.api-sports.io";
-const FINISHED = new Set(["FT", "AET", "PEN"]);
-const NOT_STARTED = new Set(["NS", "TBD"]);
 const MAX_PICKS_PER_LEAGUE = 2;
 const MARKETS: PrematchMarket[] = [
   "GOAL",
@@ -273,7 +272,7 @@ function responseFixtures(raw: any): any[] {
 
 function finishedFixtures(raw: any): any[] {
   return responseFixtures(raw).filter((fixture) =>
-    FINISHED.has(String(fixture?.fixture?.status?.short ?? "").toUpperCase()),
+    normalizeFixtureStatus(fixture?.fixture?.status).isFinished,
   );
 }
 
@@ -630,7 +629,7 @@ export async function buildBrainPrematchV2(date: string, maxMatches = 5): Promis
 async function compute(date: string, max: number, key: string) {
   const raw = await dateFixtures(date);
   const upcoming = responseFixtures(raw)
-    .filter((fixture) => NOT_STARTED.has(String(fixture?.fixture?.status?.short ?? "").toUpperCase()))
+    .filter((fixture) => normalizeFixtureStatus(fixture?.fixture?.status).isScheduled)
     .filter(allowed)
     .sort((a, b) => fixtureDate(a) - fixtureDate(b))
     .slice(0, 36);

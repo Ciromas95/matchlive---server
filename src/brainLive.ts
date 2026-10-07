@@ -12,6 +12,7 @@ import { evaluateLiveV4, LiveObservationV4, parseLiveStatsV4 } from "./liveStrat
 import { sendBrainLivePush } from "./push";
 import { loadBrainLiveState, saveBrainLiveState } from "./brainLiveState";
 import { getLiveRawFixtures, hasLiveState } from "./liveState";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 type BrainLiveCandidate = {
   fixtureId: number;
@@ -134,7 +135,10 @@ function statsForCurrentHalf(fixtureId: number, observation: LiveObservationV4):
   };
 }
 
-const LIVE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE"]);
+// Cervello Live conserva volutamente un sottoinsieme più restrittivo del
+// ciclo live. Il normalizzatore decide se la fixture è live; questo insieme
+// decide soltanto se è utilizzabile dall'algoritmo corrente.
+const BRAIN_LIVE_ELIGIBLE_STATUSES = new Set(["1H", "2H", "HT", "ET", "LIVE"]);
 
 const ALLOWED_LEAGUE_IDS = new Set<number>([
   61,  // Ligue 1
@@ -222,7 +226,8 @@ function isUsefulLiveFixture(f: any): boolean {
   const status = String(f?.fixture?.status?.short ?? "").toUpperCase();
   const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
 
-  if (!LIVE_STATUSES.has(status)) return false;
+  if (!normalizeFixtureStatus(f?.fixture?.status).isLive) return false;
+  if (!BRAIN_LIVE_ELIGIBLE_STATUSES.has(status)) return false;
   if (elapsed < 1) return false;
   if (elapsed > 80 || (elapsed >= 35 && elapsed < 46)) return false;
   if (!isAllowedLeague(f)) return false;
@@ -241,7 +246,8 @@ export function shouldRetainLiveSignal(
   statusShort: string,
 ): boolean {
   const status = statusShort.toUpperCase();
-  if (!["1H", "2H", "HT", "ET", "LIVE"].includes(status)) return false;
+  if (!normalizeFixtureStatus(status).isLive) return false;
+  if (!BRAIN_LIVE_ELIGIBLE_STATUSES.has(status)) return false;
   if (discoveredAt <= 45) return status === "1H" || status === "HT";
   return currentElapsed <= 88;
 }
@@ -569,7 +575,9 @@ async function buildBrainLive(maxResults: number = 8): Promise<BrainLiveBuildOut
     )) {
       activeSignals.delete(fixtureId);
       weakSignalObservations.delete(fixtureId);
-      if (!fixture || !LIVE_STATUSES.has(statusShort)) activeSignalScore.delete(fixtureId);
+      if (!fixture || !BRAIN_LIVE_ELIGIBLE_STATUSES.has(statusShort)) {
+        activeSignalScore.delete(fixtureId);
+      }
       continue;
     }
     evaluated.push({

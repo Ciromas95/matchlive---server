@@ -4,6 +4,7 @@ import * as api from "./apiFootball";
 import { runOnce } from "./inflight";
 import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
 import { features } from "./featureFlags";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 export type LineupStatus = "predicted" | "official" | "unavailable";
 
@@ -85,8 +86,8 @@ const asNumber = (value: any): number | null => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 };
-const isLive = (short: string) => ["1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"].includes(short);
-const isFinished = (short: string) => ["FT", "AET", "PEN"].includes(short);
+const isLive = (short: string) => normalizeFixtureStatus(short).isLive;
+const isFinished = (short: string) => normalizeFixtureStatus(short).isFinished;
 const isCup = (name: string, round: string) =>
   /cup|coppa|copa|pokal|taça|taca|coupe|trophy|champions|europa|conference|supercop|super cup/i.test(`${name} ${round}`);
 const isDecisiveRound = (round: string) =>

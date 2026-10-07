@@ -1,4 +1,9 @@
 import { getRedCardsForFixtureFromLiveCache } from "./redCardsLive";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
+import {
+  FixtureSchedule,
+  fixtureScheduleOf,
+} from "./fixtureSchedule";
 
 type LiteEvent = {
   type: string | null;
@@ -60,8 +65,7 @@ function countRedCards(
 }
 
 function isLiveStatus(statusShort?: string | null): boolean {
-  const s = String(statusShort ?? "").toUpperCase();
-  return ["1H", "2H", "HT", "ET", "BT", "P", "INT"].includes(s);
+  return normalizeFixtureStatus(statusShort).isLive;
 }
 
 /**
@@ -112,18 +116,31 @@ function resolveEventsAndReds(f: any): {
   };
 }
 
-async function fixtureToCompact(f: any): Promise<any> {
+async function fixtureToCompact(
+  f: any,
+  previousSchedule: FixtureSchedule | null = null,
+  observedAt?: Date,
+): Promise<any> {
   const fixtureId = f?.fixture?.id ?? null;
   const homeId: number | null = f?.teams?.home?.id ?? null;
   const awayId: number | null = f?.teams?.away?.id ?? null;
 
   const { events, reds } = resolveEventsAndReds(f);
+  const lifecycle = normalizeFixtureStatus(f?.fixture?.status);
+  const schedule = fixtureScheduleOf(f, {
+    previous: previousSchedule,
+    lifecycle,
+    observedAt,
+  });
 
   return {
     fixtureId,
     date: f?.fixture?.date ?? null,
+    schedule,
     statusShort: f?.fixture?.status?.short ?? null,
+    statusLong: f?.fixture?.status?.long ?? null,
     elapsed: f?.fixture?.status?.elapsed ?? null,
+    lifecycle,
 
     league: {
       id: f?.league?.id ?? null,
@@ -162,12 +179,23 @@ async function fixtureToCompact(f: any): Promise<any> {
   };
 }
 
-export async function toLiveCompact(apiData: any): Promise<any[]> {
+export async function toLiveCompact(
+  apiData: any,
+  options: {
+    previousSchedules?: ReadonlyMap<number, FixtureSchedule>;
+    observedAt?: Date;
+  } = {},
+): Promise<any[]> {
   const list = Array.isArray(apiData?.response) ? apiData.response : [];
   const out: any[] = [];
 
   for (const f of list) {
-    out.push(await fixtureToCompact(f));
+    const id = Number(f?.fixture?.id ?? 0);
+    out.push(await fixtureToCompact(
+      f,
+      options.previousSchedules?.get(id) ?? null,
+      options.observedAt,
+    ));
   }
 
   return out;
@@ -183,4 +211,3 @@ export async function toLeagueFixturesCompact(apiData: any): Promise<any[]> {
 
   return out;
 }
-

@@ -1,3 +1,5 @@
+import { fixtureLifecycleOf } from "./fixtureLifecycle";
+
 type StandingSnapshot = {
   played: number;
   goalsFor: number;
@@ -10,8 +12,6 @@ type FixtureBaseline = {
   away: StandingSnapshot;
 };
 
-const ACTIVE = new Set(["1H", "HT", "2H", "ET", "BT", "P", "PEN_LIVE", "LIVE"]);
-const FINISHED = new Set(["FT", "AET", "PEN", "PEN_FT"]);
 const g = globalThis as any;
 const completedFixtures: Map<number, { fixture: any; savedAt: number }> =
   g.__BRAINLIVE_RECENT_COMPLETED_STANDINGS__ ??
@@ -106,7 +106,7 @@ export async function primeLiveStandingsBaselines(
   const grouped = new Map<string, any[]>();
   for (const fixture of Array.isArray(liveFixtures) ? liveFixtures : []) {
     const id = numberValue(fixture?.fixture?.id);
-    if (id <= 0 || baselines.has(id) || !ACTIVE.has(fixtureStatus(fixture))) continue;
+    if (id <= 0 || baselines.has(id) || !fixtureLifecycleOf(fixture).isLive) continue;
     const league = fixtureLeague(fixture);
     if (league.leagueId <= 0 || league.season <= 0) continue;
     const key = `${league.leagueId}:${league.season}`;
@@ -150,7 +150,7 @@ export async function primeLiveStandingsBaselines(
 
 export function rememberCompletedStandingsFixture(fixture: any) {
   const id = numberValue(fixture?.fixture?.id);
-  if (id <= 0 || !FINISHED.has(fixtureStatus(fixture))) return;
+  if (id <= 0 || !fixtureLifecycleOf(fixture).isFinished) return;
   recentActiveFixtures.delete(id);
   completedFixtures.set(id, { fixture, savedAt: Date.now() });
   pruneCompletedFixtures();
@@ -194,7 +194,7 @@ export function projectLiveStandings(
     const id = numberValue(fixture?.fixture?.id);
     if (id <= 0) continue;
     presentIds.add(id);
-    if (ACTIVE.has(fixtureStatus(fixture))) {
+    if (fixtureLifecycleOf(fixture).isLive) {
       recentActiveFixtures.set(id, { fixture, seenAt: Date.now() });
       current.push(fixture);
     } else {
@@ -255,7 +255,7 @@ export function projectLiveStandings(
     if (!homeRow || !awayRow || !containingTable) continue;
 
     let baseline = baselines.get(id);
-    const isActive = ACTIVE.has(fixtureStatus(fixture));
+    const isActive = fixtureLifecycleOf(fixture).isLive;
     if (!baseline && isActive) {
       baseline = { home: blockSnapshot(homeRow), away: blockSnapshot(awayRow) };
       baselines.set(id, baseline);

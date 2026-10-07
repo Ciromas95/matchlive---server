@@ -2,6 +2,9 @@ import express, { Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
+import { withFixtureLifecycles } from "./fixtureLifecycle";
+import { fixtureScheduleOf } from "./fixtureSchedule";
+import { buildFixtureDayPayload, isValidFixtureDay } from "./fixtureDay";
 
 import * as apiFootball from "./apiFootball";
 import { flagUrlFromCountryName } from "./flags";
@@ -40,7 +43,7 @@ import { auditAdmin } from "./adminAudit";
 import { postgresReady, query as postgresQuery } from "./postgresInfrastructure";
 import { recordClientLiveTelemetry } from "./clientLiveTelemetry";
 import { startLineupScheduler } from "./lineupScheduler";
-import { inferCompetitionFormat } from "./competitionFormat";
+import { inferCompetitionFormat, resolveCompetitionChampion } from "./competitionFormat";
 
 dotenv.config();
 
@@ -229,6 +232,38 @@ app.post("/api/telemetry/live-client", (req: Request, res: Response) => {
   return res.status(204).end();
 });
 
+app.get("/api/fixtures/day", async (req: Request, res: Response) => {
+  const date = String(req.query.date ?? "").trim();
+  if (!isValidFixtureDay(date)) {
+    return res.status(400).json({
+      error: "invalid_date",
+      message: "Il parametro date deve usare il formato YYYY-MM-DD.",
+    });
+  }
+  try {
+    const providerPayload = await apiFootball.getProviderResource(
+      "/fixtures",
+      { date },
+    );
+    const payload = buildFixtureDayPayload(
+      date,
+      providerPayload,
+      getLiveStateSnapshot(),
+      getLiveRawFixtures(),
+    );
+    // La giornata incorpora lo snapshot live: cache breve e revisionata dal
+    // client, senza trasformarla in un secondo store live.
+    setSharedCache(res, 2);
+    return res.json(payload);
+  } catch (error: any) {
+    const status = Number(error?.status ?? error?.response?.status ?? 502);
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      error: "fixture_day_failed",
+      message: error?.message ?? "Giornata temporaneamente non disponibile",
+    });
+  }
+});
+
 app.get("/api/provider", async (req: Request, res: Response) => {
   const path = String(req.query.path ?? "").trim();
   const params = { ...req.query } as Record<string, unknown>;
@@ -236,7 +271,19 @@ app.get("/api/provider", async (req: Request, res: Response) => {
   try {
     const payload = await apiFootball.getProviderResource(path, params);
     setSharedCache(res, path.includes("statistics") || path.includes("events") ? 8 : 30);
-    return res.json(payload);
+    // Manteniamo intatto il contratto API-Football e aggiungiamo soltanto il
+    // DTO lifecycle alle risposte che contengono fixture. I client meno recenti
+    // ignorano il campo aggiuntivo, quelli nuovi possono consumarlo.
+    const enriched = withFixtureLifecycles(payload) as any;
+    if (Array.isArray(enriched?.response)) {
+      enriched.response = enriched.response.map((row: any) => ({
+        ...row,
+        fixture: row?.fixture == null
+          ? row?.fixture
+          : { ...row.fixture, schedule: fixtureScheduleOf(row) },
+      }));
+    }
+    return res.json(enriched);
   } catch (error: any) {
     const status = Number(error?.status ?? error?.response?.status ?? 502);
     return res.status(status >= 400 && status < 600 ? status : 502).json({
@@ -549,12 +596,40 @@ app.get("/api/competition/format", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Missing or invalid leagueId/season" });
   }
   try {
-    const [standings, fixtures] = await Promise.all([
+    const [standings, fixtures, metadata] = await Promise.all([
       apiFootball.getStandingsCached(leagueId, season).catch(() => ({ response: [] })),
       apiFootball.getLeagueSeasonFixturesCached(leagueId, season),
+      apiFootball.getLeagueMetadataCached(leagueId).catch(() => ({ response: [] })),
     ]);
+    const availableSeasons = (metadata?.response?.[0]?.seasons ?? [])
+      .map((item: any) => Number(item?.year))
+      .filter((year: number) => Number.isInteger(year) && year < season)
+      .sort((a: number, b: number) => b - a);
+    const previousSeason = availableSeasons[0] ?? season - 1;
+    const [previousStandings, previousFixtures] = await Promise.all([
+      apiFootball.getStandingsCached(leagueId, previousSeason).catch(() => ({ response: [] })),
+      apiFootball.getLeagueSeasonFixturesCached(leagueId, previousSeason).catch(() => ({ response: [] })),
+    ]);
+    const currentFormat = inferCompetitionFormat(leagueId, season, standings, fixtures);
+    const previousFormat = inferCompetitionFormat(
+      leagueId,
+      previousSeason,
+      previousStandings,
+      previousFixtures,
+    );
+    const defendingChampion = resolveCompetitionChampion(
+      previousFormat.competitionFormat,
+      previousStandings,
+      previousFixtures,
+    );
     setSharedCache(res, 60);
-    return res.json({ leagueId, season, ...inferCompetitionFormat(leagueId, season, standings, fixtures) });
+    return res.json({
+      leagueId,
+      season,
+      ...currentFormat,
+      previousSeason,
+      defendingChampion,
+    });
   } catch {
     return res.status(502).json({ error: "Competition format unavailable" });
   }

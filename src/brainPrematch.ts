@@ -7,6 +7,7 @@ import {
   markCacheMiss,
   syncProviderQuota,
 } from "./stats";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 const PREMATCH_DEBUG = (process.env.PREMATCH_DEBUG ?? "false").toLowerCase() === "true";
 
@@ -179,8 +180,6 @@ type EvaluatedPrematch = {
 };
 
 const BASE_URL = "https://v3.football.api-sports.io";
-const NOT_STARTED = new Set(["NS", "TBD"]);
-const FINISHED_STATUSES = new Set(["FT", "AET", "PEN"]);
 
 const MAX_PICKS_PER_LEAGUE = 2;
 const MIN_PICK_SCORE = 68;
@@ -405,8 +404,7 @@ function sortFixturesDescByDate(fixtures: any[]): any[] {
 function getFinishedFixtures(raw: any): any[] {
   const response = Array.isArray(raw?.response) ? raw.response : [];
   return response.filter((e: any) => {
-    const status = String(e?.fixture?.status?.short ?? "").toUpperCase();
-    return FINISHED_STATUSES.has(status);
+    return normalizeFixtureStatus(e?.fixture?.status).isFinished;
   });
 }
 
@@ -1671,8 +1669,7 @@ async function computeBrainPrematch(
 
   const upcoming = fixtures
     .filter((f: any) => {
-      const status = String(f?.fixture?.status?.short ?? "").toUpperCase();
-      if (!NOT_STARTED.has(status)) return false;
+      if (!normalizeFixtureStatus(f?.fixture?.status).isScheduled) return false;
       if (!isAllowedPrematchCompetition(f)) return false;
       return true;
     })

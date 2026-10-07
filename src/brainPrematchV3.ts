@@ -31,10 +31,9 @@ import { sendBrainPrematchPush } from "./push";
 import { claimPrematchNotification } from "./prematchNotificationState";
 import { loadPublishedPrematchDay, savePublishedPrematchDay } from "./prematchPublishedState";
 import { PrematchScanReport, savePrematchScanReport } from "./prematchScanReport";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 const BASE_URL = "https://v3.football.api-sports.io";
-const FINISHED = new Set(["FT", "AET", "PEN"]);
-const NOT_STARTED = new Set(["NS", "TBD"]);
 const CORE_MARKETS: CoreMarketV3[] = [
   "GOAL",
   "OVER 2.5",
@@ -473,7 +472,7 @@ function responseFixtures(raw: any): any[] {
 
 function finishedFixtures(raw: any): any[] {
   return responseFixtures(raw).filter((fixture) =>
-    FINISHED.has(String(fixture?.fixture?.status?.short ?? "").toUpperCase()),
+    normalizeFixtureStatus(fixture?.fixture?.status).isFinished,
   );
 }
 
@@ -1342,7 +1341,7 @@ async function compute(date: string, key: string, phase: "preparazione" | "pubbl
   const fixtures = responseFixtures(raw);
   const supported = fixtures.filter(allowed);
   const upcoming = supported
-    .filter((fixture) => NOT_STARTED.has(String(fixture?.fixture?.status?.short ?? "").toUpperCase()))
+    .filter((fixture) => normalizeFixtureStatus(fixture?.fixture?.status).isScheduled)
     .filter((fixture) => fixtureDate(fixture) > Date.now())
     .sort((a, b) => fixtureDate(a) - fixtureDate(b));
   const picks: PrematchPickV3[] = [];

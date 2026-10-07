@@ -13,6 +13,10 @@ import {
   rememberCompletedStandingsFixture,
   removeLiveStandingsFixture,
 } from "./liveStandings";
+import {
+  fixtureLifecycleOf,
+  isFixtureKickoffTransition,
+} from "./fixtureLifecycle";
 
 const lastScore = new Map<number, string>();
 
@@ -72,6 +76,14 @@ function fixtureImage(f: any, teamId?: number | null) {
   return String(home?.logo ?? away?.logo ?? f?.league?.logo ?? "");
 }
 
+function fixtureEntityRouting(f: any) {
+  return {
+    homeTeamId: String(f?.teams?.home?.id ?? ""),
+    awayTeamId: String(f?.teams?.away?.id ?? ""),
+    leagueId: String(f?.league?.id ?? ""),
+  };
+}
+
 function premiumScoreLine(
   f: any,
   highlightedTeamId?: number | null,
@@ -101,13 +113,21 @@ async function sendNewEventPush(f: any, ev: any, fixtureId: number) {
   const teamId = Number(ev?.team?.id) || null;
   const imageUrl = fixtureImage(f, teamId);
   const minute = eventMinute(ev);
+  const assistName = String(ev?.assist?.name ?? "").trim();
   const common = {
+    ...fixtureEntityRouting(f),
     imageUrl,
     homeName: String(f?.teams?.home?.name ?? ""),
     awayName: String(f?.teams?.away?.name ?? ""),
     homeLogo: String(f?.teams?.home?.logo ?? ""),
     awayLogo: String(f?.teams?.away?.logo ?? ""),
     teamName: team,
+    playerId: String(ev?.player?.id ?? ""),
+    playerName: String(ev?.player?.name ?? ""),
+    assistId: String(ev?.assist?.id ?? ""),
+    assistName,
+    eventId: makeEventId(ev, fixtureId),
+    elapsed: String(ev?.time?.elapsed ?? ""),
     minute,
     score,
   };
@@ -116,7 +136,7 @@ async function sendNewEventPush(f: any, ev: any, fixtureId: number) {
       fixtureId,
       "goal",
       `⚽ GOOOL · ${team || "RETE"}`,
-      `${premiumScoreLine(f, teamId, "goal")}${minute ? ` · ${minute}` : ""}`,
+      `${premiumScoreLine(f, teamId, "goal")}${minute ? ` · ${minute}` : ""}${assistName ? ` · Assist ${assistName}` : ""}`,
       common,
     );
   } else if (type === "card" && (detail.includes("red") || detail.includes("second yellow"))) {
@@ -137,26 +157,32 @@ async function checkFinishedFixtures(liveIds: Set<number>) {
     if (tracked.missing < 2) continue;
     const raw = await getFixtureById(fixtureId).catch(() => null);
     const fixture = raw?.response?.[0];
-    const status = String(fixture?.fixture?.status?.short ?? "").toUpperCase();
-    if (["FT", "AET", "PEN", "PEN_FT"].includes(status)) {
+    const lifecycle = fixtureLifecycleOf(fixture);
+    if (lifecycle.isFinished) {
       rememberCompletedStandingsFixture(fixture);
-      const score = `${fixture?.goals?.home ?? 0}-${fixture?.goals?.away ?? 0}`;
-      await sendFixturePush(
-        fixtureId,
-        "finished",
-        "🏁 TRIPLICE FISCHIO",
-        `${String(fixture?.teams?.home?.name ?? "Casa")}  ${fixture?.goals?.home ?? 0}  •  ${fixture?.goals?.away ?? 0}  ${String(fixture?.teams?.away?.name ?? "Trasferta")}`,
-        {
-          imageUrl: fixtureImage(fixture),
-          score,
-          homeName: String(fixture?.teams?.home?.name ?? ""),
-          awayName: String(fixture?.teams?.away?.name ?? ""),
-          homeLogo: String(fixture?.teams?.home?.logo ?? ""),
-          awayLogo: String(fixture?.teams?.away?.logo ?? ""),
-        },
-      );
+      // In questa fase manteniamo la notifica storica soltanto per conclusioni
+      // giocate. AWD/WO sono terminali, ma una notifica dedicata verrà gestita
+      // nella futura centralizzazione delle transizioni/notifiche.
+      if (lifecycle.resultType !== "awarded" && lifecycle.resultType !== "walkover") {
+        const score = `${fixture?.goals?.home ?? 0}-${fixture?.goals?.away ?? 0}`;
+        await sendFixturePush(
+          fixtureId,
+          "finished",
+          "🏁 TRIPLICE FISCHIO",
+          `${String(fixture?.teams?.home?.name ?? "Casa")}  ${fixture?.goals?.home ?? 0}  •  ${fixture?.goals?.away ?? 0}  ${String(fixture?.teams?.away?.name ?? "Trasferta")}`,
+          {
+            ...fixtureEntityRouting(fixture),
+            imageUrl: fixtureImage(fixture),
+            score,
+            homeName: String(fixture?.teams?.home?.name ?? ""),
+            awayName: String(fixture?.teams?.away?.name ?? ""),
+            homeLogo: String(fixture?.teams?.home?.logo ?? ""),
+            awayLogo: String(fixture?.teams?.away?.logo ?? ""),
+          },
+        );
+      }
       trackedLive.delete(fixtureId);
-    } else if (status && !["1H", "HT", "2H", "ET", "BT", "P", "PEN_LIVE", "LIVE"].includes(status)) {
+    } else if (lifecycle.providerStatusShort && !lifecycle.isLive) {
       // Sospesa, interrotta, abbandonata, rinviata o cancellata: la sua
       // proiezione deve sparire senza alterare punti e reti ufficiali.
       removeLiveStandingsFixture(fixtureId);
@@ -196,16 +222,25 @@ export function startPoller() {
         if (!fixtureId) continue;
 
         liveIds.add(fixtureId);
-        const alreadyTracked = trackedLive.has(fixtureId);
+        const previousTracked = trackedLive.get(fixtureId)?.fixture;
+        const alreadyTracked = previousTracked != null;
+        const previousLifecycle = previousTracked == null
+          ? null
+          : fixtureLifecycleOf(previousTracked);
+        const currentLifecycle = fixtureLifecycleOf(f);
         trackedLive.set(fixtureId, { fixture: f, missing: 0 });
         const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
-        if (!alreadyTracked && elapsed <= 2) {
+        if (
+          elapsed <= 2 &&
+          isFixtureKickoffTransition(previousLifecycle, currentLifecycle)
+        ) {
           await sendFixturePush(
             fixtureId,
             "kickoff",
             "🏟️ SI COMINCIA",
             `${String(f?.teams?.home?.name ?? "Casa")}  0  •  0  ${String(f?.teams?.away?.name ?? "Trasferta")}`,
             {
+              ...fixtureEntityRouting(f),
               imageUrl: fixtureImage(f),
               homeName: String(f?.teams?.home?.name ?? ""),
               awayName: String(f?.teams?.away?.name ?? ""),
@@ -242,6 +277,7 @@ export function startPoller() {
               "↩️ CORREZIONE",
               premiumScoreLine(f),
               {
+                ...fixtureEntityRouting(f),
                 imageUrl: fixtureImage(
                   f,
                   Number(correctedTeam?.id) || null,

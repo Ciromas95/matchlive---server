@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
 import { features } from "./featureFlags";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 type PickRecord = {
   fixtureId: number;
@@ -153,8 +154,7 @@ export async function reconcilePrematchPicks(
 
       for (const pick of pending.filter((item) => item.date === date)) {
         const fixture = byId.get(pick.fixtureId);
-        const status = String(fixture?.fixture?.status?.short ?? "").toUpperCase();
-        if (!new Set(["FT", "AET", "PEN"]).has(status)) continue;
+        if (!normalizeFixtureStatus(fixture?.fixture?.status).isFinished) continue;
         const home = Number(fixture?.score?.fulltime?.home ?? fixture?.goals?.home);
         const away = Number(fixture?.score?.fulltime?.away ?? fixture?.goals?.away);
         if (!Number.isFinite(home) || !Number.isFinite(away)) continue;

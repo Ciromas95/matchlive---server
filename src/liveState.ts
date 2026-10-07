@@ -6,6 +6,7 @@ import { features } from "./featureFlags";
 import { setRedisJson } from "./redisInfrastructure";
 import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
 import { recordLiveRedis } from "./livePipelineTelemetry";
+import { FixtureSchedule, fixtureScheduleFrom } from "./fixtureSchedule";
 
 export type LiveStateDelta = {
   type: "live_delta";
@@ -113,6 +114,9 @@ function visibleSignature(row: any): string {
     homeRedCards: row?.home?.redCards ?? null,
     awayRedCards: row?.away?.redCards ?? null,
     events: row?.events ?? null,
+    effectiveKickoffAt: row?.schedule?.effectiveKickoffAt ?? null,
+    displayDay: row?.schedule?.displayDay ?? null,
+    scheduleRevision: row?.schedule?.scheduleRevision ?? 0,
   });
 }
 
@@ -127,7 +131,10 @@ function rememberGlobals() {
  * Unica fotografia autorevole del live. Il poller del server è l'unico writer;
  * app, liste, preferiti e Cervello leggono tutti questo stesso stato.
  */
-export async function publishLiveState(providerPayload: any): Promise<LiveStateDelta | null> {
+export async function publishLiveState(
+  providerPayload: any,
+  options: { observedAt?: Date } = {},
+): Promise<LiveStateDelta | null> {
   const nextRaw = Array.isArray(providerPayload?.response)
     ? providerPayload.response
     : [];
@@ -136,7 +143,15 @@ export async function publishLiveState(providerPayload: any): Promise<LiveStateD
     const id = Number(fixture?.fixture?.id ?? 0);
     if (id > 0) previousRawById.set(id, fixture);
   }
-  const nextCompact = await toLiveCompact({ response: nextRaw });
+  const previousSchedules = new Map<number, FixtureSchedule>();
+  for (const [id, row] of compactByFixture) {
+    const schedule = fixtureScheduleFrom(row?.schedule);
+    if (schedule) previousSchedules.set(id, schedule);
+  }
+  const nextCompact = await toLiveCompact(
+    { response: nextRaw },
+    { previousSchedules, observedAt: options.observedAt ?? new Date() },
+  );
   const nextById = new Map<number, any>();
   for (const row of nextCompact) {
     const id = fixtureId(row);

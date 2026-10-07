@@ -168,16 +168,39 @@ export async function sendFixturePush(
     `${type}:${extra.score ?? ""}:${extra.elapsed ?? ""}:${extra.teamId ?? ""}`;
   const claimKey = `fixture:${fixtureId}:${eventKey}`;
   if (!await claimPush(claimKey, 36 * 60 * 60)) return;
-  const topic = `brainlive_fixture_${fixtureId}_${type}`;
+  const fixtureTopic = `brainlive_fixture_${fixtureId}_${type}`;
+  const topicNames = [fixtureTopic];
+  const homeTeamId = Number(extra.homeTeamId);
+  const awayTeamId = Number(extra.awayTeamId);
+  if (Number.isInteger(homeTeamId) && homeTeamId > 0) {
+    topicNames.push(`brainlive_team_${homeTeamId}_${type}`);
+  }
+  if (Number.isInteger(awayTeamId) && awayTeamId > 0) {
+    topicNames.push(`brainlive_team_${awayTeamId}_${type}`);
+  }
+  if (type === "goal" || type === "red") {
+    for (const rawId of [extra.playerId, extra.assistId]) {
+      const playerId = Number(rawId);
+      if (Number.isInteger(playerId) && playerId > 0) {
+        topicNames.push(`brainlive_player_${playerId}_event`);
+      }
+    }
+  }
+  // Un singolo messaggio condition evita duplicati quando lo stesso device
+  // segue contemporaneamente il match, una squadra e un giocatore coinvolto.
+  const condition = [...new Set(topicNames)]
+    .slice(0, 5)
+    .map((name) => `'${name}' in topics`)
+    .join(" || ");
   const imageUrl = extra.imageUrl?.trim();
   const richImage = extra.matchupImageUrl?.trim() || imageUrl;
   const priority: QueuePriority =
     type === "goal" || type === "red" || type === "correction"
     ? "critical"
     : "normal";
-  queueAutomaticPush(priority, topic, async () => {
+  queueAutomaticPush(priority, fixtureTopic, async () => {
     await sendClaimed(claimKey, () => getMessaging().send({
-      topic,
+      condition,
       notification: { title, body },
       data: { fixtureId: String(fixtureId), type, title, body, ...extra },
       android: {
