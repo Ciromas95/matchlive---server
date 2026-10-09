@@ -698,8 +698,13 @@ app.get("/api/stream", (req: Request, res: Response) => {
   res.flushHeaders();
 
   res.write(`data: ${JSON.stringify({ type: "hello" })}\n\n`);
-  if (types.length === 0 || types.includes("live_snapshot") || types.includes("live_delta")) {
+  const wantsLiveState = types.length === 0 ||
+    types.includes("live_snapshot") ||
+    types.includes("live_delta");
+  let lastFullSnapshotRevision: number | null = null;
+  if (wantsLiveState) {
     const snapshot = getLiveStateSnapshot();
+    lastFullSnapshotRevision = snapshot.revision;
     res.write(`data: ${JSON.stringify({
       type: "live_snapshot",
       revision: snapshot.revision,
@@ -710,6 +715,22 @@ app.get("/api/stream", (req: Request, res: Response) => {
 
   const heartbeat = setInterval(() => {
     try {
+      // I delta restano il percorso rapido. La fotografia periodica, inviata
+      // soltanto se la revisione e cambiata dall'ultimo snapshot completo,
+      // riallinea automaticamente un dispositivo che abbia perso un evento.
+      if (wantsLiveState) {
+        const snapshot = getLiveStateSnapshot();
+        if (snapshot.revision !== lastFullSnapshotRevision) {
+          lastFullSnapshotRevision = snapshot.revision;
+          res.write(`data: ${JSON.stringify({
+            type: "live_snapshot",
+            revision: snapshot.revision,
+            updatedAt: snapshot.updatedAt,
+            fixtures: snapshot.fixtures,
+          })}\n\n`);
+          return;
+        }
+      }
       writeHeartbeat(res, `: ping ${Date.now()}\n\n`);
     } catch {
       clearInterval(heartbeat);
