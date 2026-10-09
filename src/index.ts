@@ -3,12 +3,17 @@ import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
 import { withFixtureLifecycles } from "./fixtureLifecycle";
-import { fixtureScheduleOf } from "./fixtureSchedule";
-import { buildFixtureDayPayload, isValidFixtureDay } from "./fixtureDay";
+import { fixtureScheduleFrom, fixtureScheduleOf } from "./fixtureSchedule";
+import {
+  buildFixtureDayPayload,
+  isValidFixtureDay,
+  mergeProviderFixturePayloads,
+  shiftFixtureDay,
+} from "./fixtureDay";
 
 import * as apiFootball from "./apiFootball";
 import { flagUrlFromCountryName } from "./flags";
-import { toLiveCompact } from "./compact";
+import { mergeLiveCompactFixtures, toLiveCompact } from "./compact";
 import { addClient, clientsCount, removeClient, writeHeartbeat } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
@@ -241,9 +246,16 @@ app.get("/api/fixtures/day", async (req: Request, res: Response) => {
     });
   }
   try {
-    const providerPayload = await apiFootball.getProviderResource(
-      "/fixtures",
-      { date },
+    const previousProviderDay = shiftFixtureDay(date, -1);
+    const [currentProviderPayload, previousProviderPayload] = await Promise.all([
+      apiFootball.getProviderResource("/fixtures", { date }),
+      apiFootball.getProviderResource("/fixtures", {
+        date: previousProviderDay,
+      }),
+    ]);
+    const providerPayload = mergeProviderFixturePayloads(
+      currentProviderPayload,
+      [previousProviderPayload],
     );
     const payload = buildFixtureDayPayload(
       date,
@@ -476,20 +488,34 @@ app.get("/api/live", async (_req: Request, res: Response) => {
 app.get("/api/live/compact", async (_req: Request, res: Response) => {
   try {
     setSharedCache(res, 2);
-    if (hasLiveState()) {
-      const snapshot = getLiveStateSnapshot();
-      return res.json({
-        updatedAt: snapshot.updatedAt,
-        revision: snapshot.revision,
-        results: snapshot.fixtures.length,
-        fixtures: snapshot.fixtures,
-      });
+    const snapshot = getLiveStateSnapshot();
+    let fixtures = snapshot.fixtures;
+    let updatedAt = snapshot.updatedAt;
+    try {
+      // Anche con uno snapshot presente controlliamo il feed live condiviso:
+      // una gara appena iniziata non deve apparire in Tutte ma mancare da Live
+      // durante la finestra tra due cicli del poller.
+      const data = await apiFootball.getLiveFixtures("compact", true);
+      const previousSchedules = new Map(
+        snapshot.fixtures.flatMap((row: any) => {
+          const id = Number(row?.fixtureId ?? 0);
+          const schedule = fixtureScheduleFrom(row?.schedule);
+          return id > 0 && schedule != null ? [[id, schedule] as const] : [];
+        }),
+      );
+      const current = await toLiveCompact(data, { previousSchedules });
+      fixtures = mergeLiveCompactFixtures(snapshot.fixtures, current);
+      updatedAt = new Date().toISOString();
+    } catch (error) {
+      // Se il provider ha un problema momentaneo, la fotografia gia acquisita
+      // resta utilizzabile. Senza snapshot lasciamo gestire l'errore al catch
+      // esterno, evitando di presentare una lista vuota come risposta valida.
+      if (!hasLiveState()) throw error;
     }
-    const data = await apiFootball.getLiveFixtures("compact");
-    const fixtures = await toLiveCompact(data);
 
     return res.json({
-      updatedAt: new Date().toISOString(),
+      updatedAt,
+      revision: snapshot.revision,
       results: fixtures.length,
       fixtures,
     });

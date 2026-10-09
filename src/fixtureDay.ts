@@ -27,6 +27,48 @@ export function isValidFixtureDay(value: unknown): value is string {
   return validDisplayDay(value);
 }
 
+/**
+ * Restituisce un giorno civile adiacente senza dipendere dal timezone del
+ * processo Node. I parametri `date` di API-Football sono giorni UTC, mentre
+ * la giornata BrainLive e Europe/Rome: per ricostruire le ore subito dopo
+ * mezzanotte italiana serve quindi anche il giorno provider precedente.
+ */
+export function shiftFixtureDay(value: string, days: number): string {
+  if (!validDisplayDay(value)) throw new Error("invalid_fixture_day");
+  const [year, month, day] = value.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return [
+    shifted.getUTCFullYear().toString().padStart(4, "0"),
+    (shifted.getUTCMonth() + 1).toString().padStart(2, "0"),
+    shifted.getUTCDate().toString().padStart(2, "0"),
+  ].join("-");
+}
+
+/**
+ * Combina piu finestre calendario API-Football conservando il contratto del
+ * payload principale. La deduplicazione e sempre per fixtureId; in caso di
+ * sovrapposizione prevale la riga della giornata richiesta.
+ */
+export function mergeProviderFixturePayloads(
+  primaryPayload: any,
+  additionalPayloads: any[] = [],
+): any {
+  const byId = new Map<number, any>();
+  for (const payload of [...additionalPayloads, primaryPayload]) {
+    const rows = Array.isArray(payload?.response) ? payload.response : [];
+    for (const row of rows) {
+      const id = fixtureIdOf(row);
+      if (id > 0) byId.set(id, row);
+    }
+  }
+  const response = [...byId.values()];
+  return {
+    ...(primaryPayload ?? {}),
+    results: response.length,
+    response,
+  };
+}
+
 function canonicalizeSchedule(
   schedule: FixtureSchedule,
   lifecycle: ReturnType<typeof normalizeFixtureStatus>,

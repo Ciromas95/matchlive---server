@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildFixtureDayPayload } from "../src/fixtureDay";
+import {
+  buildFixtureDayPayload,
+  mergeProviderFixturePayloads,
+  shiftFixtureDay,
+} from "../src/fixtureDay";
 import {
   getLiveRawFixtures,
   getLiveStateSnapshot,
@@ -195,4 +199,34 @@ test("uno snapshot ripristinato conserva il giorno operativo osservato", () => {
   assert.equal(restored.response.length, 1);
   assert.equal(restored.response[0].fixture.schedule.displayDay, "2026-10-04");
   assert.equal(restored.response[0].fixture.date, "2026-10-03T18:30:00+02:00");
+});
+
+test("la finestra provider precedente conserva una fixture dopo mezzanotte a Roma", () => {
+  resetLiveStateForTests();
+  const lateBrazil = fixture("FT", 90);
+  lateBrazil.fixture.id = 1520912;
+  lateBrazil.fixture.date = "2026-10-08T22:30:00+00:00";
+  lateBrazil.league = {
+    id: 72,
+    name: "Serie B",
+    country: "Brazil",
+    season: 2026,
+  };
+
+  const mergedProvider = mergeProviderFixturePayloads(
+    providerDay([]),
+    [providerDay([lateBrazil])],
+  );
+  const day9 = buildFixtureDayPayload(
+    "2026-10-09",
+    mergedProvider,
+    getLiveStateSnapshot(),
+    getLiveRawFixtures(),
+  );
+
+  assert.equal(day9.response.length, 1);
+  assert.equal(day9.response[0].fixture.id, 1520912);
+  assert.equal(day9.response[0].fixture.date, "2026-10-08T22:30:00+00:00");
+  assert.equal(day9.response[0].fixture.schedule.displayDay, "2026-10-09");
+  assert.equal(shiftFixtureDay("2026-10-09", -1), "2026-10-08");
 });

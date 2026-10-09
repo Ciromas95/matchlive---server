@@ -201,6 +201,28 @@ export async function toLiveCompact(
   return out;
 }
 
+/**
+ * Riconcilia la fotografia del poller con una lettura corrente del feed live.
+ * La fixture mantiene una sola identita e il dato corrente prevale; le righe
+ * presenti soltanto nello snapshot restano per tollerare un singolo feed
+ * provider incompleto, come gia avviene nel liveState.
+ */
+export function mergeLiveCompactFixtures(
+  snapshotFixtures: any[],
+  currentFixtures: any[],
+): any[] {
+  const byId = new Map<number, any>();
+  for (const row of snapshotFixtures ?? []) {
+    const id = Number(row?.fixtureId ?? 0);
+    if (id > 0) byId.set(id, row);
+  }
+  for (const row of currentFixtures ?? []) {
+    const id = Number(row?.fixtureId ?? 0);
+    if (id > 0) byId.set(id, row);
+  }
+  return [...byId.values()];
+}
+
 export async function toLeagueFixturesCompact(apiData: any): Promise<any[]> {
   const list = Array.isArray(apiData?.response) ? apiData.response : [];
   const out: any[] = [];
