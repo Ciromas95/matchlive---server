@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
 import { withFixtureLifecycles } from "./fixtureLifecycle";
-import { fixtureScheduleFrom, fixtureScheduleOf } from "./fixtureSchedule";
+import { fixtureScheduleOf } from "./fixtureSchedule";
 import {
   buildFixtureDayPayload,
   isValidFixtureDay,
@@ -13,7 +13,6 @@ import {
 
 import * as apiFootball from "./apiFootball";
 import { flagUrlFromCountryName } from "./flags";
-import { mergeLiveCompactFixtures, toLiveCompact } from "./compact";
 import { addClient, clientsCount, removeClient, writeHeartbeat } from "./stream";
 import { startPoller } from "./poller";
 import { getApiStats, markAppRequest } from "./stats";
@@ -29,7 +28,7 @@ import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
 import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
-import { getLiveRawFixtures, getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres } from "./liveState";
+import { getLiveRawFixtures, getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres, publishLiveState } from "./liveState";
 import { projectLiveStandings } from "./liveStandings";
 import { priorityQueueSnapshot } from "./priorityQueue";
 import { providerQueueSnapshot } from "./providerRateLimiter";
@@ -488,7 +487,7 @@ app.get("/api/live", async (_req: Request, res: Response) => {
 app.get("/api/live/compact", async (_req: Request, res: Response) => {
   try {
     setSharedCache(res, 2);
-    const snapshot = getLiveStateSnapshot();
+    let snapshot = getLiveStateSnapshot();
     let fixtures = snapshot.fixtures;
     let updatedAt = snapshot.updatedAt;
     try {
@@ -496,16 +495,13 @@ app.get("/api/live/compact", async (_req: Request, res: Response) => {
       // una gara appena iniziata non deve apparire in Tutte ma mancare da Live
       // durante la finestra tra due cicli del poller.
       const data = await apiFootball.getLiveFixtures("compact", true);
-      const previousSchedules = new Map(
-        snapshot.fixtures.flatMap((row: any) => {
-          const id = Number(row?.fixtureId ?? 0);
-          const schedule = fixtureScheduleFrom(row?.schedule);
-          return id > 0 && schedule != null ? [[id, schedule] as const] : [];
-        }),
-      );
-      const current = await toLiveCompact(data, { previousSchedules });
-      fixtures = mergeLiveCompactFixtures(snapshot.fixtures, current);
-      updatedAt = new Date().toISOString();
+      // La lettura fresca deve aggiornare anche la fotografia autorevole e la
+      // revisione SSE. Restituire soltanto una fusione locale rendeva possibile
+      // vedere il match in Tutte ma non nello store globale della pagina Live.
+      await publishLiveState(data);
+      snapshot = getLiveStateSnapshot();
+      fixtures = snapshot.fixtures;
+      updatedAt = snapshot.updatedAt;
     } catch (error) {
       // Se il provider ha un problema momentaneo, la fotografia gia acquisita
       // resta utilizzabile. Senza snapshot lasciamo gestire l'errore al catch

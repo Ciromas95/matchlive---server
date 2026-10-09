@@ -31,6 +31,7 @@ const compactByFixture: Map<number, any> =
 let revision: number = g.__BRAINLIVE_LIVE_REVISION__ ?? 0;
 let updatedAt: string | null = g.__BRAINLIVE_LIVE_UPDATED_AT__ ?? null;
 let rawFixtures: any[] = g.__BRAINLIVE_RAW_FIXTURES__ ?? [];
+let publishQueue: Promise<void> = Promise.resolve();
 const missingPolls: Map<number, number> =
   g.__BRAINLIVE_MISSING_POLLS__ ??
   (g.__BRAINLIVE_MISSING_POLLS__ = new Map<number, number>());
@@ -128,10 +129,11 @@ function rememberGlobals() {
 }
 
 /**
- * Unica fotografia autorevole del live. Il poller del server è l'unico writer;
- * app, liste, preferiti e Cervello leggono tutti questo stesso stato.
+ * Unica fotografia autorevole del live. Il poller e le letture fresche del
+ * relativo endpoint scrivono in coda; app, liste, preferiti e Cervello leggono
+ * tutti questo stesso stato.
  */
-export async function publishLiveState(
+async function publishLiveStateNow(
   providerPayload: any,
   options: { observedAt?: Date } = {},
 ): Promise<LiveStateDelta | null> {
@@ -221,6 +223,23 @@ export async function publishLiveState(
   return delta;
 }
 
+/**
+ * Serializza tutti gli aggiornamenti della fotografia Live. Normalmente il
+ * poller e l'unico writer, ma anche una lettura HTTP fresca puo scoprire una
+ * gara appena iniziata: senza coda due conversioni asincrone concorrenti
+ * potrebbero applicarsi in ordine inverso e perdere una fixture.
+ */
+export function publishLiveState(
+  providerPayload: any,
+  options: { observedAt?: Date } = {},
+): Promise<LiveStateDelta | null> {
+  const task = publishQueue.then(() =>
+    publishLiveStateNow(providerPayload, options)
+  );
+  publishQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
+
 export function getLiveStateSnapshot(): LiveStateSnapshot {
   return {
     revision,
@@ -245,5 +264,6 @@ export function resetLiveStateForTests() {
   missingPolls.clear();
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = null;
+  publishQueue = Promise.resolve();
   rememberGlobals();
 }

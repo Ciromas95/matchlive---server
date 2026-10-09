@@ -83,3 +83,21 @@ test("stato live: una singola risposta vuota non fa sparire la partita", async (
   assert.deepEqual(confirmed?.remove, [9001]);
   assert.equal(getLiveStateSnapshot().fixtures.length, 0);
 });
+
+test("stato live: una fixture scoperta da una lettura fresca entra nello snapshot autorevole", async () => {
+  resetLiveStateForTests();
+  await publishLiveState({ response: [fixture(9)] });
+
+  const second = fixture(2);
+  second.fixture.id = 9002;
+  second.teams.home.name = "Braga";
+  second.teams.away.name = "Sporting";
+  const delta = await publishLiveState({ response: [fixture(10), second] });
+
+  assert.equal(delta?.revision, 2);
+  assert.deepEqual(
+    getLiveStateSnapshot().fixtures.map((row) => row.fixtureId).sort(),
+    [9001, 9002],
+  );
+  assert.equal(delta?.upsert.some((row) => row.fixtureId === 9002), true);
+});
