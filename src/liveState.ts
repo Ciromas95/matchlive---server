@@ -38,10 +38,20 @@ type MissingLiveObservation = {
   observations: number;
 };
 
+type LiveExitObservation = {
+  statusShort: string;
+  firstObservedAtMs: number;
+};
+
 const missingLiveObservations: Map<number, MissingLiveObservation> =
   g.__BRAINLIVE_MISSING_LIVE_OBSERVATIONS__ ??
   (g.__BRAINLIVE_MISSING_LIVE_OBSERVATIONS__ =
     new Map<number, MissingLiveObservation>());
+
+const liveExitObservations: Map<number, LiveExitObservation> =
+  g.__BRAINLIVE_LIVE_EXIT_OBSERVATIONS__ ??
+  (g.__BRAINLIVE_LIVE_EXIT_OBSERVATIONS__ =
+    new Map<number, LiveExitObservation>());
 
 // Il feed live del provider puo risultare incompleto per un singolo ciclo.
 // Aspettiamo almeno tre fotografie autorevoli e venti secondi prima di
@@ -50,6 +60,8 @@ const missingLiveObservations: Map<number, MissingLiveObservation> =
 // rimozioni.
 const LIVE_MISSING_GRACE_MS = 20_000;
 const LIVE_MISSING_MIN_OBSERVATIONS = 3;
+const LIVE_INTERRUPTED_EXIT_GRACE_MS = 60_000;
+const LIVE_TERMINAL_EXIT_GRACE_MS = 20_000;
 const LIVE_STATE_STORE_PATH = process.env.LIVE_STATE_STORE_PATH ??
   "/data/brainlive-live-state.json";
 let persistTimer: NodeJS.Timeout | null = null;
@@ -136,6 +148,17 @@ function visibleSignature(row: any): string {
   });
 }
 
+function liveExitGraceMs(statusShort: unknown): number {
+  const status = String(statusShort ?? "").trim().toUpperCase();
+  if (["INT", "SUSP", "PST", "CANC", "ABD"].includes(status)) {
+    return LIVE_INTERRUPTED_EXIT_GRACE_MS;
+  }
+  if (["FT", "AET", "PEN", "PEN_FT", "AWD", "WO"].includes(status)) {
+    return LIVE_TERMINAL_EXIT_GRACE_MS;
+  }
+  return 0;
+}
+
 function rememberGlobals() {
   g.__BRAINLIVE_LIVE_REVISION__ = revision;
   g.__BRAINLIVE_LIVE_UPDATED_AT__ = updatedAt;
@@ -173,15 +196,65 @@ async function publishLiveStateNow(
     { previousSchedules, observedAt },
   );
   const nextById = new Map<number, any>();
+  const explicitlyExitedIds = new Set<number>();
   for (const row of nextCompact) {
     const id = fixtureId(row);
-    if (id > 0) nextById.set(id, row);
+    if (id <= 0) continue;
+    const lifecycle = normalizeFixtureStatus({
+      short: row?.statusShort,
+      long: row?.statusLong,
+    });
+    if (lifecycle.isLive) {
+      liveExitObservations.delete(id);
+      nextById.set(id, row);
+      continue;
+    }
+
+    // Le letture HTTP non autorevoli non possono iniziare o concludere una
+    // transizione. Il poller globale e l'unico orologio della finestra di
+    // uscita dalla Live.
+    if (!authoritativeAbsence) continue;
+    const previous = compactByFixture.get(id);
+    if (previous == null) {
+      // Una fixture gia non-live non deve entrare ex novo nella pagina Live.
+      liveExitObservations.delete(id);
+      explicitlyExitedIds.add(id);
+      continue;
+    }
+    const graceMs = liveExitGraceMs(row?.statusShort);
+    if (graceMs <= 0) {
+      explicitlyExitedIds.add(id);
+      continue;
+    }
+    const statusShort = lifecycle.providerStatusShort;
+    const priorExit = liveExitObservations.get(id);
+    // Il provider puo oscillare INT -> SUSP -> INT. Lo status visualizzato si
+    // aggiorna, ma la finestra parte dalla prima uscita dal gioco e non viene
+    // riavviata a ogni cambio di etichetta.
+    const exit = priorExit == null
+      ? { statusShort, firstObservedAtMs: observedAt.getTime() }
+      : { statusShort, firstObservedAtMs: priorExit.firstObservedAtMs };
+    liveExitObservations.set(id, exit);
+    const ageMs = Math.max(0, observedAt.getTime() - exit.firstObservedAtMs);
+    if (ageMs < graceMs) {
+      nextById.set(id, row);
+    } else {
+      liveExitObservations.delete(id);
+      explicitlyExitedIds.add(id);
+    }
   }
 
   // Una risposta momentaneamente incompleta del provider non deve far
   // lampeggiare o sparire una partita da tutte le schermate.
   for (const [id, previous] of compactByFixture) {
     if (nextById.has(id)) {
+      missingLiveObservations.delete(id);
+      continue;
+    }
+
+    // Lo stato non-live e stato osservato esplicitamente: allo scadere della
+    // finestra non va riaggiunto dalla tolleranza per feed incompleti.
+    if (explicitlyExitedIds.has(id)) {
       missingLiveObservations.delete(id);
       continue;
     }
@@ -220,7 +293,12 @@ async function publishLiveStateNow(
     if (!nextById.has(id)) remove.push(id);
   }
 
-  const retainedRaw = [...nextRaw];
+  // Anche il raw condiviso deve rappresentare la stessa fotografia della UI:
+  // niente fixture non-live rimaste nel payload solo perche il provider le
+  // include ancora in live=all.
+  const retainedRaw = nextRaw.filter((fixture: any) =>
+    nextById.has(Number(fixture?.fixture?.id ?? 0))
+  );
   const receivedRawIds = new Set(
     nextRaw.map((fixture: any) => Number(fixture?.fixture?.id ?? 0)),
   );
@@ -233,6 +311,14 @@ async function publishLiveStateNow(
   for (const [id, row] of nextById) compactByFixture.set(id, row);
   for (const id of missingLiveObservations.keys()) {
     if (!compactByFixture.has(id)) missingLiveObservations.delete(id);
+  }
+  const receivedIds = new Set(
+    nextRaw.map((fixture: any) => Number(fixture?.fixture?.id ?? 0)),
+  );
+  for (const id of liveExitObservations.keys()) {
+    if (!receivedIds.has(id) && !compactByFixture.has(id)) {
+      liveExitObservations.delete(id);
+    }
   }
 
   if (upsert.length === 0 && remove.length === 0) {
@@ -325,6 +411,7 @@ async function publishLiveDiscoveriesNow(
     const id = fixtureId(row);
     compactByFixture.set(id, row);
     missingLiveObservations.delete(id);
+    liveExitObservations.delete(id);
   }
   updatedAt = new Date().toISOString();
   revision += 1;
@@ -388,6 +475,7 @@ export function resetLiveStateForTests() {
   revision = 0;
   updatedAt = null;
   missingLiveObservations.clear();
+  liveExitObservations.clear();
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = null;
   publishQueue = Promise.resolve();

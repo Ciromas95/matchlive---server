@@ -1,5 +1,6 @@
 import { getRedCardsForFixtureFromLiveCache } from "./redCardsLive";
 import { normalizeFixtureStatus } from "./fixtureLifecycle";
+import { reconcileFixtureEvents } from "./fixtureEvents";
 import {
   FixtureSchedule,
   fixtureScheduleOf,
@@ -87,7 +88,7 @@ function resolveEventsAndReds(f: any): {
   const homeId: number | null = f?.teams?.home?.id ?? null;
   const awayId: number | null = f?.teams?.away?.id ?? null;
 
-  const events = Array.isArray(f?.events) ? f.events : [];
+  const events = reconcileFixtureEvents(f);
 
   if (events.length > 0) {
     const reds = countRedCards(events, homeId, awayId);

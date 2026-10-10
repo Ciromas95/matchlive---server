@@ -29,6 +29,16 @@ function fixture(
   };
 }
 
+function withStatus(row: any, short: string, elapsed: number | null = null) {
+  return {
+    ...row,
+    fixture: {
+      ...row.fixture,
+      status: { short, elapsed },
+    },
+  };
+}
+
 test("stato live: pubblica solo variazioni e mantiene la revisione coerente", async () => {
   resetLiveStateForTests();
   const first = await publishLiveState({ response: [fixture()] });
@@ -215,4 +225,82 @@ test("la giornata pubblica una nuova live senza rimuovere le altre dirette", asy
   const duplicate = await publishLiveDiscoveries({ response: [discovered] });
   assert.equal(duplicate, null);
   assert.equal(getLiveStateSnapshot().revision, 2);
+});
+
+for (const status of ["INT", "SUSP", "PST", "CANC", "ABD"]) {
+  test(`stato live: ${status} resta per 60 secondi e poi esce senza rientrare`, async () => {
+    resetLiveStateForTests();
+    const start = new Date("2026-10-10T12:00:00Z");
+    await publishLiveState({ response: [fixture()] }, { observedAt: start });
+
+    const exited = withStatus(fixture(), status);
+    const transition = await publishLiveState(
+      { response: [exited] },
+      { observedAt: new Date("2026-10-10T12:00:05Z") },
+    );
+    assert.equal(transition?.upsert[0].statusShort, status);
+    assert.equal(getLiveStateSnapshot().fixtures.length, 1);
+
+    await publishLiveState(
+      { response: [exited] },
+      { observedAt: new Date("2026-10-10T12:01:04Z") },
+    );
+    assert.equal(getLiveStateSnapshot().fixtures.length, 1);
+
+    const removed = await publishLiveState(
+      { response: [exited] },
+      { observedAt: new Date("2026-10-10T12:01:05Z") },
+    );
+    assert.deepEqual(removed?.remove, [9001]);
+    assert.equal(getLiveStateSnapshot().fixtures.length, 0);
+    assert.equal(getLiveRawFixtures().length, 0);
+
+    const repeated = await publishLiveState(
+      { response: [exited] },
+      { observedAt: new Date("2026-10-10T12:01:10Z") },
+    );
+    assert.equal(repeated, null);
+    assert.equal(getLiveStateSnapshot().fixtures.length, 0);
+  });
+}
+
+test("stato live: INT e SUSP non entrano ex novo e la ripresa resta la stessa fixture", async () => {
+  resetLiveStateForTests();
+  const start = new Date("2026-10-10T12:00:00Z");
+  const interrupted = withStatus(fixture(), "INT");
+  await publishLiveState({ response: [interrupted] }, { observedAt: start });
+  assert.equal(getLiveStateSnapshot().fixtures.length, 0);
+
+  await publishLiveState(
+    { response: [fixture()] },
+    { observedAt: new Date("2026-10-10T12:00:05Z") },
+  );
+  await publishLiveState(
+    { response: [interrupted] },
+    { observedAt: new Date("2026-10-10T12:00:10Z") },
+  );
+  const resumed = await publishLiveState(
+    { response: [fixture(20)] },
+    { observedAt: new Date("2026-10-10T12:00:20Z") },
+  );
+  assert.equal(resumed?.remove.length, 0);
+  assert.equal(getLiveStateSnapshot().fixtures.length, 1);
+  assert.equal(getLiveStateSnapshot().fixtures[0].statusShort, "1H");
+});
+
+test("stato live: oscillare INT e SUSP non riavvia la finestra di uscita", async () => {
+  resetLiveStateForTests();
+  await publishLiveState(
+    { response: [fixture()] },
+    { observedAt: new Date("2026-10-10T12:00:00Z") },
+  );
+  await publishLiveState(
+    { response: [withStatus(fixture(), "INT")] },
+    { observedAt: new Date("2026-10-10T12:00:05Z") },
+  );
+  const removed = await publishLiveState(
+    { response: [withStatus(fixture(), "SUSP")] },
+    { observedAt: new Date("2026-10-10T12:01:05Z") },
+  );
+  assert.deepEqual(removed?.remove, [9001]);
 });

@@ -17,6 +17,10 @@ import {
   fixtureLifecycleOf,
   isFixtureKickoffTransition,
 } from "./fixtureLifecycle";
+import {
+  isConfirmedScoringGoalEvent,
+  reconcileFixtureEvents,
+} from "./fixtureEvents";
 
 const lastScore = new Map<number, string>();
 
@@ -52,7 +56,8 @@ function pruneLastScore(liveFixtureIds: Set<number>) {
 function isInterestingEvent(ev: any) {
   const t = String(ev?.type ?? "").toLowerCase();
   const detail = String(ev?.detail ?? "").toLowerCase();
-  return t === "goal" || (t === "card" && (detail.includes("red") || detail.includes("second yellow")));
+  return isConfirmedScoringGoalEvent(ev) ||
+    (t === "card" && (detail.includes("red") || detail.includes("second yellow")));
 }
 
 function matchName(f: any) {
@@ -209,7 +214,9 @@ export function startPoller() {
       const data = await getLiveFixtures("live", true);
       const processingStarted = performance.now();
       const fixtures = Array.isArray(data?.response) ? data.response : [];
-      const liveCount = fixtures.length;
+      const liveCount = fixtures.filter((fixture: any) =>
+        fixtureLifecycleOf(fixture).isLive
+      ).length;
       void primeLiveStandingsBaselines(fixtures, getStandingsCached).catch((error: any) => {
         console.warn("[liveStandings] baseline non disponibile:", error?.message ?? error);
       });
@@ -221,14 +228,23 @@ export function startPoller() {
         const fixtureId = f?.fixture?.id;
         if (!fixtureId) continue;
 
-        liveIds.add(fixtureId);
         const previousTracked = trackedLive.get(fixtureId)?.fixture;
         const alreadyTracked = previousTracked != null;
         const previousLifecycle = previousTracked == null
           ? null
           : fixtureLifecycleOf(previousTracked);
         const currentLifecycle = fixtureLifecycleOf(f);
-        trackedLive.set(fixtureId, { fixture: f, missing: 0 });
+        if (currentLifecycle.isLive) {
+          liveIds.add(fixtureId);
+          trackedLive.set(fixtureId, { fixture: f, missing: 0 });
+        } else if (alreadyTracked) {
+          // Conserva il contatore di uscita: il provider puo lasciare INT o
+          // SUSP dentro live=all e non deve azzerare `missing` a ogni polling.
+          trackedLive.set(fixtureId, {
+            fixture: f,
+            missing: trackedLive.get(fixtureId)?.missing ?? 0,
+          });
+        }
         const elapsed = Number(f?.fixture?.status?.elapsed ?? 0);
         if (
           elapsed <= 2 &&
@@ -298,7 +314,10 @@ export function startPoller() {
         if (prev !== scoreStr) lastScore.set(fixtureId, scoreStr);
 
         // eventi: controlliamo SEMPRE (non solo se cambia score)
-        const events = Array.isArray(f?.events) ? f.events : [];
+        // Gli eventi goal vengono notificati solo quando sono compatibili con
+        // il punteggio ufficiale. Un record provvisorio a 0-0 resta non visto:
+        // se il provider conferma la rete al polling dopo, verra processato.
+        const events = reconcileFixtureEvents(f);
         for (const ev of events) {
           if (!isInterestingEvent(ev)) continue;
 

@@ -84,7 +84,7 @@ test("distingue rigori live e rigori conclusi", () => {
   }
 });
 
-test("LIVE → INT → LIVE resta un unico ciclo live e non genera kickoff", () => {
+test("LIVE → INT → LIVE non genera kickoff e INT non e realmente live", () => {
   const playing = lifecycle("LIVE");
   const interrupted = lifecycle("INT");
   const resumed = lifecycle("LIVE");
@@ -98,7 +98,7 @@ test("LIVE → INT → LIVE resta un unico ciclo live e non genera kickoff", () 
     },
     {
       state: "interrupted",
-      live: true,
+      live: false,
       active: false,
       paused: true,
       finished: false,

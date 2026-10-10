@@ -103,10 +103,20 @@ const definitions: Readonly<Record<string, LifecycleDefinition>> = {
   P: live("RIGORI"),
   PEN_LIVE: live("RIGORI"),
   LIVE: live("LIVE"),
-  INT: live("PARTITA INTERROTTA", {
-    paused: true,
-    state: "interrupted",
-  }),
+  INT: {
+    lifecycleState: "interrupted",
+    resultType: null,
+    // INT non e una partita in corso: la breve permanenza nella schermata
+    // Live e una regola di presentazione gestita dallo snapshot globale.
+    isLive: false,
+    isActivelyPlaying: false,
+    isPaused: true,
+    isFinished: false,
+    isScheduled: false,
+    isPostponed: false,
+    isCancelled: false,
+    displayStatus: "PARTITA INTERROTTA",
+  },
   SUSP: {
     lifecycleState: "suspended",
     resultType: null,
