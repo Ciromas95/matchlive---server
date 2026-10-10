@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   getLiveStateSnapshot,
+  getLiveRawFixtures,
+  publishLiveDiscoveries,
   publishLiveState,
   resetLiveStateForTests,
 } from "../src/liveState";
@@ -100,4 +102,36 @@ test("stato live: una fixture scoperta da una lettura fresca entra nello snapsho
     [9001, 9002],
   );
   assert.equal(delta?.upsert.some((row) => row.fixtureId === 9002), true);
+});
+
+test("la giornata pubblica una nuova live senza rimuovere le altre dirette", async () => {
+  resetLiveStateForTests();
+  await publishLiveState({ response: [fixture(18, 1)] });
+
+  const discovered = fixture(2);
+  discovered.fixture.id = 9002;
+  discovered.teams.home.name = "Braga";
+  discovered.teams.away.name = "Sporting";
+  const scheduled = fixture(0);
+  scheduled.fixture.id = 9003;
+  scheduled.fixture.status = { short: "NS", elapsed: null };
+
+  const delta = await publishLiveDiscoveries({
+    response: [discovered, scheduled],
+  });
+
+  assert.equal(delta?.remove.length, 0);
+  assert.deepEqual(
+    getLiveStateSnapshot().fixtures.map((row) => row.fixtureId).sort(),
+    [9001, 9002],
+  );
+  assert.deepEqual(
+    getLiveRawFixtures().map((row) => row.fixture.id).sort(),
+    [9001, 9002],
+  );
+  assert.equal(getLiveStateSnapshot().revision, 2);
+
+  const duplicate = await publishLiveDiscoveries({ response: [discovered] });
+  assert.equal(duplicate, null);
+  assert.equal(getLiveStateSnapshot().revision, 2);
 });

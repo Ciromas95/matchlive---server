@@ -8,6 +8,7 @@ import {
 import {
   getLiveRawFixtures,
   getLiveStateSnapshot,
+  publishLiveDiscoveries,
   publishLiveState,
   resetLiveStateForTests,
 } from "../src/liveState";
@@ -46,6 +47,30 @@ function providerDay(rows: any[]) {
     response: rows,
   };
 }
+
+test("Tutte e Live condividono subito una fixture appena iniziata", async () => {
+  resetLiveStateForTests();
+  const justStarted = fixture("1H", 2);
+  justStarted.fixture.date = "2026-10-10T20:45:00+02:00";
+
+  await publishLiveDiscoveries(
+    providerDay([justStarted]),
+    { observedAt: new Date("2026-10-10T20:47:00+02:00") },
+  );
+  const snapshot = getLiveStateSnapshot();
+  const day = buildFixtureDayPayload(
+    "2026-10-10",
+    providerDay([justStarted]),
+    snapshot,
+    getLiveRawFixtures(),
+  );
+
+  assert.equal(snapshot.fixtures.length, 1);
+  assert.equal(snapshot.fixtures[0].fixtureId, fixtureId);
+  assert.equal(day.response.length, 1);
+  assert.equal(day.response[0].fixture.id, fixtureId);
+  assert.equal(day.brainlive.liveRevision, snapshot.revision);
+});
 
 test("E2E logico: fixture 3 ottobre live il 4 viene spostata senza duplicati", async () => {
   resetLiveStateForTests();

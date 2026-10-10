@@ -7,6 +7,7 @@ import { setRedisJson } from "./redisInfrastructure";
 import { readShadowDocument, shadowWriteDocument } from "./shadowStorage";
 import { recordLiveRedis } from "./livePipelineTelemetry";
 import { FixtureSchedule, fixtureScheduleFrom } from "./fixtureSchedule";
+import { normalizeFixtureStatus } from "./fixtureLifecycle";
 
 export type LiveStateDelta = {
   type: "live_delta";
@@ -235,6 +236,96 @@ export function publishLiveState(
 ): Promise<LiveStateDelta | null> {
   const task = publishQueue.then(() =>
     publishLiveStateNow(providerPayload, options)
+  );
+  publishQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
+
+/**
+ * Inserisce nello snapshot autorevole le sole nuove fixture realmente LIVE
+ * scoperte da una vista parziale (per esempio il calendario giornaliero).
+ *
+ * A differenza di publishLiveState, questa operazione non interpreta
+ * l'assenza dalla risposta come una rimozione: una giornata non rappresenta
+ * infatti l'intero feed live mondiale. Le fixture gia presenti restano
+ * affidate al poller globale, cosi una risposta calendario eventualmente
+ * meno fresca non puo far arretrare punteggio o cronometro.
+ */
+async function publishLiveDiscoveriesNow(
+  providerPayload: any,
+  options: { observedAt?: Date } = {},
+): Promise<LiveStateDelta | null> {
+  const candidates = Array.isArray(providerPayload?.response)
+    ? providerPayload.response.filter((row: any) => {
+      const id = Number(row?.fixture?.id ?? 0);
+      return id > 0 &&
+        !compactByFixture.has(id) &&
+        normalizeFixtureStatus(row?.fixture?.status).isLive;
+    })
+    : [];
+  if (candidates.length === 0) return null;
+
+  const discovered = await toLiveCompact(
+    { response: candidates },
+    { observedAt: options.observedAt ?? new Date() },
+  );
+  const upsert = discovered.filter((row) => {
+    const id = fixtureId(row);
+    return id > 0 && !compactByFixture.has(id);
+  });
+  if (upsert.length === 0) return null;
+
+  const rawById = new Map<number, any>();
+  for (const row of rawFixtures) {
+    const id = Number(row?.fixture?.id ?? 0);
+    if (id > 0) rawById.set(id, row);
+  }
+  for (const row of candidates) {
+    const id = Number(row?.fixture?.id ?? 0);
+    if (id > 0 && !rawById.has(id)) rawById.set(id, row);
+  }
+  rawFixtures = [...rawById.values()];
+
+  for (const row of upsert) {
+    const id = fixtureId(row);
+    compactByFixture.set(id, row);
+    missingPolls.delete(id);
+  }
+  updatedAt = new Date().toISOString();
+  revision += 1;
+  rememberGlobals();
+  if (features.redisLiveState) {
+    const redisStarted = performance.now();
+    await setRedisJson(
+      "live:snapshot",
+      {
+        revision,
+        updatedAt,
+        fixtures: [...compactByFixture.values()],
+        rawFixtures,
+      },
+      180,
+    );
+    recordLiveRedis(performance.now() - redisStarted);
+  }
+  const delta: LiveStateDelta = {
+    type: "live_delta",
+    revision,
+    updatedAt,
+    providerAgeMs: 0,
+    upsert,
+    remove: [],
+  };
+  broadcast(delta);
+  return delta;
+}
+
+export function publishLiveDiscoveries(
+  providerPayload: any,
+  options: { observedAt?: Date } = {},
+): Promise<LiveStateDelta | null> {
+  const task = publishQueue.then(() =>
+    publishLiveDiscoveriesNow(providerPayload, options)
   );
   publishQueue = task.then(() => undefined, () => undefined);
   return task;

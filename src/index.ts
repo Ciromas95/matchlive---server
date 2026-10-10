@@ -28,7 +28,7 @@ import { configuredAdminSessionStore } from "./adminSessions";
 import { startBrainPrematchSchedulerV3 } from "./brainPrematchV3";
 import { getLatestPrematchScanReport } from "./prematchScanReport";
 import { sendAdminPushTest } from "./push";
-import { getLiveRawFixtures, getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres, publishLiveState } from "./liveState";
+import { getLiveRawFixtures, getLiveStateSnapshot, hasLiveState, hydrateLiveStateFromPostgres, publishLiveDiscoveries, publishLiveState } from "./liveState";
 import { projectLiveStandings } from "./liveStandings";
 import { priorityQueueSnapshot } from "./priorityQueue";
 import { providerQueueSnapshot } from "./providerRateLimiter";
@@ -256,6 +256,11 @@ app.get("/api/fixtures/day", async (req: Request, res: Response) => {
       currentProviderPayload,
       [previousProviderPayload],
     );
+    // Il calendario giornaliero puo vedere l'avvio di una gara prima del
+    // feed globale. Pubblicare la sola nuova scoperta nello snapshot condiviso
+    // rende Tutte, Live e SSE immediatamente coerenti per fixtureId, senza
+    // trattare questa risposta parziale come una fotografia globale.
+    await publishLiveDiscoveries(providerPayload);
     const payload = buildFixtureDayPayload(
       date,
       providerPayload,
