@@ -33,9 +33,23 @@ let revision: number = g.__BRAINLIVE_LIVE_REVISION__ ?? 0;
 let updatedAt: string | null = g.__BRAINLIVE_LIVE_UPDATED_AT__ ?? null;
 let rawFixtures: any[] = g.__BRAINLIVE_RAW_FIXTURES__ ?? [];
 let publishQueue: Promise<void> = Promise.resolve();
-const missingPolls: Map<number, number> =
-  g.__BRAINLIVE_MISSING_POLLS__ ??
-  (g.__BRAINLIVE_MISSING_POLLS__ = new Map<number, number>());
+type MissingLiveObservation = {
+  firstObservedAtMs: number;
+  observations: number;
+};
+
+const missingLiveObservations: Map<number, MissingLiveObservation> =
+  g.__BRAINLIVE_MISSING_LIVE_OBSERVATIONS__ ??
+  (g.__BRAINLIVE_MISSING_LIVE_OBSERVATIONS__ =
+    new Map<number, MissingLiveObservation>());
+
+// Il feed live del provider puo risultare incompleto per un singolo ciclo.
+// Aspettiamo almeno tre fotografie autorevoli e venti secondi prima di
+// considerare davvero uscita una fixture. Le letture HTTP non contribuiscono
+// mai a questa conferma: il poller globale e l'unico responsabile delle
+// rimozioni.
+const LIVE_MISSING_GRACE_MS = 20_000;
+const LIVE_MISSING_MIN_OBSERVATIONS = 3;
 const LIVE_STATE_STORE_PATH = process.env.LIVE_STATE_STORE_PATH ??
   "/data/brainlive-live-state.json";
 let persistTimer: NodeJS.Timeout | null = null;
@@ -130,14 +144,17 @@ function rememberGlobals() {
 }
 
 /**
- * Unica fotografia autorevole del live. Il poller e le letture fresche del
- * relativo endpoint scrivono in coda; app, liste, preferiti e Cervello leggono
- * tutti questo stesso stato.
+ * Unica fotografia condivisa del live. Il poller pubblica fotografie globali
+ * autorevoli anche per le assenze; le letture HTTP fresche possono invece
+ * aggiungere o aggiornare dati senza rimuovere. App, liste, preferiti e
+ * Cervello leggono tutti questo stesso stato.
  */
 async function publishLiveStateNow(
   providerPayload: any,
-  options: { observedAt?: Date } = {},
+  options: { observedAt?: Date; authoritativeAbsence?: boolean } = {},
 ): Promise<LiveStateDelta | null> {
+  const observedAt = options.observedAt ?? new Date();
+  const authoritativeAbsence = options.authoritativeAbsence ?? true;
   const nextRaw = Array.isArray(providerPayload?.response)
     ? providerPayload.response
     : [];
@@ -153,7 +170,7 @@ async function publishLiveStateNow(
   }
   const nextCompact = await toLiveCompact(
     { response: nextRaw },
-    { previousSchedules, observedAt: options.observedAt ?? new Date() },
+    { previousSchedules, observedAt },
   );
   const nextById = new Map<number, any>();
   for (const row of nextCompact) {
@@ -165,12 +182,30 @@ async function publishLiveStateNow(
   // lampeggiare o sparire una partita da tutte le schermate.
   for (const [id, previous] of compactByFixture) {
     if (nextById.has(id)) {
-      missingPolls.delete(id);
+      missingLiveObservations.delete(id);
       continue;
     }
-    const misses = (missingPolls.get(id) ?? 0) + 1;
-    missingPolls.set(id, misses);
-    if (misses < 2) nextById.set(id, previous);
+
+    // Endpoint HTTP e viste parziali possono scoprire/aggiornare fixture, ma
+    // non rappresentano una fotografia globale affidabile per le assenze.
+    if (!authoritativeAbsence) {
+      nextById.set(id, previous);
+      continue;
+    }
+
+    const previousMissing = missingLiveObservations.get(id);
+    const missing = previousMissing == null
+      ? { firstObservedAtMs: observedAt.getTime(), observations: 1 }
+      : {
+        firstObservedAtMs: previousMissing.firstObservedAtMs,
+        observations: previousMissing.observations + 1,
+      };
+    missingLiveObservations.set(id, missing);
+    const missingForMs = Math.max(0, observedAt.getTime() - missing.firstObservedAtMs);
+    const confirmedMissing =
+      missing.observations >= LIVE_MISSING_MIN_OBSERVATIONS &&
+      missingForMs >= LIVE_MISSING_GRACE_MS;
+    if (!confirmedMissing) nextById.set(id, previous);
   }
 
   const upsert: any[] = [];
@@ -196,8 +231,8 @@ async function publishLiveStateNow(
   updatedAt = new Date().toISOString();
   compactByFixture.clear();
   for (const [id, row] of nextById) compactByFixture.set(id, row);
-  for (const id of missingPolls.keys()) {
-    if (!compactByFixture.has(id)) missingPolls.delete(id);
+  for (const id of missingLiveObservations.keys()) {
+    if (!compactByFixture.has(id)) missingLiveObservations.delete(id);
   }
 
   if (upsert.length === 0 && remove.length === 0) {
@@ -225,14 +260,14 @@ async function publishLiveStateNow(
 }
 
 /**
- * Serializza tutti gli aggiornamenti della fotografia Live. Normalmente il
- * poller e l'unico writer, ma anche una lettura HTTP fresca puo scoprire una
- * gara appena iniziata: senza coda due conversioni asincrone concorrenti
- * potrebbero applicarsi in ordine inverso e perdere una fixture.
+ * Serializza tutti gli aggiornamenti della fotografia Live. Il poller e
+ * l'unica autorita per le rimozioni, ma anche una lettura HTTP fresca puo
+ * scoprire una gara appena iniziata: senza coda due conversioni asincrone
+ * concorrenti potrebbero applicarsi in ordine inverso e perdere una fixture.
  */
 export function publishLiveState(
   providerPayload: any,
-  options: { observedAt?: Date } = {},
+  options: { observedAt?: Date; authoritativeAbsence?: boolean } = {},
 ): Promise<LiveStateDelta | null> {
   const task = publishQueue.then(() =>
     publishLiveStateNow(providerPayload, options)
@@ -289,7 +324,7 @@ async function publishLiveDiscoveriesNow(
   for (const row of upsert) {
     const id = fixtureId(row);
     compactByFixture.set(id, row);
-    missingPolls.delete(id);
+    missingLiveObservations.delete(id);
   }
   updatedAt = new Date().toISOString();
   revision += 1;
@@ -352,7 +387,7 @@ export function resetLiveStateForTests() {
   rawFixtures = [];
   revision = 0;
   updatedAt = null;
-  missingPolls.clear();
+  missingLiveObservations.clear();
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = null;
   publishQueue = Promise.resolve();

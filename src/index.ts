@@ -503,7 +503,10 @@ app.get("/api/live/compact", async (_req: Request, res: Response) => {
       // La lettura fresca deve aggiornare anche la fotografia autorevole e la
       // revisione SSE. Restituire soltanto una fusione locale rendeva possibile
       // vedere il match in Tutte ma non nello store globale della pagina Live.
-      await publishLiveState(data);
+      // La richiesta HTTP puo aggiungere e aggiornare le fixture osservate,
+      // ma non deve rimuovere quelle assenti da una risposta momentaneamente
+      // incompleta. Le rimozioni sono confermate soltanto dal poller globale.
+      await publishLiveState(data, { authoritativeAbsence: false });
       snapshot = getLiveStateSnapshot();
       fixtures = snapshot.fixtures;
       updatedAt = snapshot.updatedAt;

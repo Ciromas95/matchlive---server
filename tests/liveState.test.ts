@@ -73,17 +73,98 @@ test("stato live: observedLiveAt resta stabile tra polling", async () => {
   );
 });
 
-test("stato live: una singola risposta vuota non fa sparire la partita", async () => {
+test("stato live: assenze ravvicinate non fanno lampeggiare la partita", async () => {
   resetLiveStateForTests();
-  await publishLiveState({ response: [fixture()] });
+  const start = new Date("2026-10-10T18:00:00Z");
+  await publishLiveState({ response: [fixture()] }, { observedAt: start });
 
-  const transient = await publishLiveState({ response: [] });
+  const transient = await publishLiveState(
+    { response: [] },
+    { observedAt: new Date("2026-10-10T18:00:04Z") },
+  );
   assert.equal(transient, null);
   assert.equal(getLiveStateSnapshot().fixtures.length, 1);
 
-  const confirmed = await publishLiveState({ response: [] });
+  const repeatedTooSoon = await publishLiveState(
+    { response: [] },
+    { observedAt: new Date("2026-10-10T18:00:08Z") },
+  );
+  assert.equal(repeatedTooSoon, null);
+  assert.equal(getLiveStateSnapshot().fixtures.length, 1);
+
+  const confirmed = await publishLiveState(
+    { response: [] },
+    { observedAt: new Date("2026-10-10T18:00:25Z") },
+  );
   assert.deepEqual(confirmed?.remove, [9001]);
   assert.equal(getLiveStateSnapshot().fixtures.length, 0);
+});
+
+test("stato live: una lettura HTTP non autorevole non puo rimuovere fixture", async () => {
+  resetLiveStateForTests();
+  await publishLiveState(
+    { response: [fixture()] },
+    { observedAt: new Date("2026-10-10T18:00:00Z") },
+  );
+
+  for (const timestamp of [
+    "2026-10-10T18:00:05Z",
+    "2026-10-10T18:00:25Z",
+    "2026-10-10T18:01:00Z",
+  ]) {
+    const delta = await publishLiveState(
+      { response: [] },
+      {
+        observedAt: new Date(timestamp),
+        authoritativeAbsence: false,
+      },
+    );
+    assert.equal(delta, null);
+    assert.equal(getLiveStateSnapshot().fixtures.length, 1);
+  }
+});
+
+test("stato live: HTTP aggiunge una nuova fixture senza perdere quella esistente", async () => {
+  resetLiveStateForTests();
+  await publishLiveState({ response: [fixture(15)] });
+
+  const discovered = fixture(2);
+  discovered.fixture.id = 9002;
+  discovered.teams.home.name = "Braga";
+  discovered.teams.away.name = "Sporting";
+  const delta = await publishLiveState(
+    { response: [discovered] },
+    { authoritativeAbsence: false },
+  );
+
+  assert.deepEqual(delta?.remove, []);
+  assert.deepEqual(
+    getLiveStateSnapshot().fixtures.map((row) => row.fixtureId).sort(),
+    [9001, 9002],
+  );
+});
+
+test("stato live: la ricomparsa azzera la conferma di assenza", async () => {
+  resetLiveStateForTests();
+  await publishLiveState(
+    { response: [fixture()] },
+    { observedAt: new Date("2026-10-10T18:00:00Z") },
+  );
+  await publishLiveState(
+    { response: [] },
+    { observedAt: new Date("2026-10-10T18:00:04Z") },
+  );
+  await publishLiveState(
+    { response: [fixture(18)] },
+    { observedAt: new Date("2026-10-10T18:00:12Z") },
+  );
+
+  const missingAgain = await publishLiveState(
+    { response: [] },
+    { observedAt: new Date("2026-10-10T18:00:30Z") },
+  );
+  assert.equal(missingAgain, null);
+  assert.equal(getLiveStateSnapshot().fixtures.length, 1);
 });
 
 test("stato live: una fixture scoperta da una lettura fresca entra nello snapshot autorevole", async () => {

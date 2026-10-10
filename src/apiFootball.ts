@@ -309,6 +309,13 @@ export async function getLiveFixtures(
 
   const running = getInflight<any>(cacheKey);
   if (running) {
+    // Chi richiede esplicitamente una fotografia fresca (poller/compact) non
+    // deve ricevere il valore stale solo perche un altro refresh e gia in
+    // corso. Attende la stessa Promise condivisa senza generare altre chiamate.
+    if (waitForFreshWhenStale) {
+      markCacheHit(); if (type === "live") recordLiveCacheSource("inflight");
+      return running;
+    }
     if (cached.state === "stale" && cached.value != null) {
       markCacheHit(); if (type === "live") recordLiveCacheSource("inflight");
       return cached.value;
