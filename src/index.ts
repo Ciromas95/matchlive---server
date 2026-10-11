@@ -651,6 +651,9 @@ app.get("/api/competition/format", async (req: Request, res: Response) => {
       previousFormat.competitionFormat,
       previousStandings,
       previousFixtures,
+      {
+        competitionType: metadata?.response?.[0]?.league?.type,
+      },
     );
     setSharedCache(res, 60);
     return res.json({

@@ -64,3 +64,108 @@ test("a league champion still comes from the final table", () => {
   ]] } }] };
   assert.equal(resolveCompetitionChampion("round_robin", standings, { response: [] })?.name, "Napoli");
 });
+
+test("a relegation final never replaces the league champion", () => {
+  const standings = { response: [{ league: { standings: [[
+    { rank: 1, group: "Ligue 1", team: { id: 85, name: "Paris Saint Germain" } },
+    { rank: 16, group: "Ligue 1", team: { id: 84, name: "Nice" } },
+  ]] } }] };
+  const fixtures = { response: [{
+    fixture: { date: "2026-05-29T18:45:00Z", status: { short: "FT" } },
+    league: { round: "Final" },
+    teams: {
+      home: { id: 84, name: "Nice", winner: true },
+      away: { id: 1063, name: "Saint Etienne", winner: false },
+    },
+    goals: { home: 4, away: 1 },
+  }] };
+  assert.equal(resolveCompetitionChampion(
+    "groups_then_knockout",
+    standings,
+    fixtures,
+    { competitionType: "League" },
+  )?.name, "Paris Saint Germain");
+});
+
+test("a championship round is authoritative over qualification finals", () => {
+  const standings = { response: [{ league: { standings: [
+    [
+      { rank: 1, group: "Superliga, Championship Round", team: { id: 1, name: "Aarhus" } },
+      { rank: 2, group: "Superliga, Championship Round", team: { id: 2, name: "Midtjylland" } },
+    ],
+    [
+      { rank: 1, group: "Superliga, Relegation Round", team: { id: 3, name: "Copenhagen" } },
+    ],
+  ] } }] };
+  const fixtures = { response: [{
+    fixture: { date: "2026-05-29T18:45:00Z", status: { short: "FT" } },
+    league: { round: "Final" },
+    teams: {
+      home: { id: 3, name: "Copenhagen", winner: true },
+      away: { id: 4, name: "Brondby", winner: false },
+    },
+    goals: { home: 2, away: 1 },
+  }] };
+  assert.equal(resolveCompetitionChampion(
+    "groups_then_knockout",
+    standings,
+    fixtures,
+    { competitionType: "League" },
+  )?.name, "Aarhus");
+});
+
+test("a league explicitly marked Final Series keeps its playoff champion", () => {
+  const standings = { response: [{ league: { standings: [[
+    {
+      rank: 1,
+      group: "A-League",
+      description: "Final Series",
+      team: { id: 1, name: "Premiers" },
+    },
+    { rank: 2, group: "A-League", team: { id: 2, name: "Champions" } },
+  ]] } }] };
+  const fixtures = { response: [{
+    fixture: { date: "2026-05-29T18:45:00Z", status: { short: "FT" } },
+    league: { round: "Grand Final" },
+    teams: {
+      home: { id: 1, name: "Premiers", winner: false },
+      away: { id: 2, name: "Champions", winner: true },
+    },
+    goals: { home: 1, away: 2 },
+  }] };
+  assert.equal(resolveCompetitionChampion(
+    "groups_then_knockout",
+    standings,
+    fixtures,
+    { competitionType: "League" },
+  )?.name, "Champions");
+});
+
+test("a two-legged cup final is resolved by aggregate score", () => {
+  const fixtures = { response: [
+    {
+      fixture: { date: "2026-05-20T18:45:00Z", status: { short: "FT" } },
+      league: { round: "Final" },
+      teams: {
+        home: { id: 1, name: "Alpha", winner: true },
+        away: { id: 2, name: "Beta", winner: false },
+      },
+      goals: { home: 3, away: 0 },
+    },
+    {
+      fixture: { date: "2026-05-27T18:45:00Z", status: { short: "FT" } },
+      league: { round: "Final" },
+      teams: {
+        home: { id: 2, name: "Beta", winner: true },
+        away: { id: 1, name: "Alpha", winner: false },
+      },
+      goals: { home: 2, away: 0 },
+    },
+  ] };
+  assert.equal(resolveCompetitionChampion(
+    "knockout",
+    { response: [] },
+    fixtures,
+    { competitionType: "Cup" },
+  )?.name, "Alpha");
+});

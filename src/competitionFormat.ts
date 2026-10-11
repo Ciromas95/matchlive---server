@@ -22,6 +22,10 @@ export type CompetitionPhaseDefinition = {
   kind: CompetitionPhaseKind;
 };
 
+type CompetitionChampionOptions = {
+  competitionType?: string | null;
+};
+
 type CompetitionDefinition = {
   fromSeason?: number;
   toSeason?: number;
@@ -297,24 +301,101 @@ export function resolveCompetitionChampion(
   format: CompetitionFormat,
   standingsPayload: any,
   fixturesPayload: any,
+  options: CompetitionChampionOptions = {},
 ): any | null {
-  if (format === "round_robin") {
-    const groups = standingsPayload?.response?.[0]?.league?.standings;
-    if (!Array.isArray(groups) || groups.length !== 1 || !Array.isArray(groups[0])) return null;
-    return groups[0][0]?.team ?? null;
+  const tables = competitionStandingsTables(standingsPayload);
+  const titleTable = tables.find((table) => isTitleTable(table));
+  const singleTable = tables.length === 1 ? tables[0] : null;
+  const standingsChampion = rankOneTeam(titleTable ?? singleTable);
+  const competitionType = String(options.competitionType ?? "").trim().toLowerCase();
+  const titleIsDecidedByPlayoffs = singleTable != null && tableSignalsTitlePlayoffs(singleTable);
+
+  // Nei campionati europei il provider inserisce spesso nella stessa league
+  // spareggi promozione/retrocessione o per le coppe, chiamandoli soltanto
+  // "Final". Non sono finali per il titolo: la classifica conclusiva (o il
+  // Championship Round) resta autoritativa.
+  if (standingsChampion != null && (
+    titleTable != null ||
+    (competitionType === "league" && singleTable != null && !titleIsDecidedByPlayoffs) ||
+    (competitionType === "" && format === "round_robin")
+  )) {
+    return standingsChampion;
   }
+
+  return championFromCompletedFinals(fixturesPayload);
+}
+
+function competitionStandingsTables(payload: any): any[][] {
+  const groups = payload?.response?.[0]?.league?.standings;
+  if (!Array.isArray(groups)) return [];
+  return groups.filter((table: any) => Array.isArray(table) && table.length > 0);
+}
+
+function rankOneTeam(table: any[] | null | undefined): any | null {
+  if (!Array.isArray(table) || table.length === 0) return null;
+  const ranked = table.find((row: any) => Number(row?.rank) === 1) ??
+    [...table].sort((a: any, b: any) => Number(a?.rank ?? 9999) - Number(b?.rank ?? 9999))[0];
+  return ranked?.team ?? null;
+}
+
+function tableGroupName(table: any[]): string {
+  return String(table?.[0]?.group ?? "").trim().toLowerCase();
+}
+
+function isTitleTable(table: any[]): boolean {
+  const group = tableGroupName(table);
+  return /(?:championship|champion round|title round|scudetto)/i.test(group) &&
+    !/(?:qualification|qualifying|relegation|conference)/i.test(group);
+}
+
+function tableSignalsTitlePlayoffs(table: any[]): boolean {
+  return table.some((row: any) => {
+    const description = String(row?.description ?? "").trim().toLowerCase();
+    return /(?:final series|championship play-?offs?|championship series|title play-?offs?)/i.test(description);
+  });
+}
+
+function championFromCompletedFinals(fixturesPayload: any): any | null {
   const fixtures = Array.isArray(fixturesPayload?.response) ? fixturesPayload.response : [];
   const finals = fixtures.filter((row: any) => {
     const round = String(row?.league?.round ?? "").toLowerCase().trim();
     const isFinal = /(^|\s)(grand )?final(s)?($|\s|-)/.test(round) && !/(semi|quarter|1\/|round of|third|3rd|play-?off)/.test(round);
     return isFinal && normalizeFixtureStatus(row?.fixture?.status).isFinished;
   }).sort((a: any, b: any) => Date.parse(b?.fixture?.date ?? "") - Date.parse(a?.fixture?.date ?? ""));
-  const final = finals[0];
-  if (!final) return null;
-  if (final?.teams?.home?.winner === true) return final.teams.home;
-  if (final?.teams?.away?.winner === true) return final.teams.away;
-  const home = Number(final?.goals?.home);
-  const away = Number(final?.goals?.away);
-  if (Number.isFinite(home) && Number.isFinite(away) && home !== away) return home > away ? final?.teams?.home ?? null : final?.teams?.away ?? null;
+  const decisiveFinal = finals[0];
+  if (!decisiveFinal) return null;
+
+  const teamKey = (team: any) => String(team?.id ?? team?.name ?? "").trim().toLowerCase();
+  const decisiveKeys = new Set([
+    teamKey(decisiveFinal?.teams?.home),
+    teamKey(decisiveFinal?.teams?.away),
+  ]);
+  if (decisiveKeys.has("")) return null;
+  const legs = finals.filter((row: any) => {
+    const keys = new Set([teamKey(row?.teams?.home), teamKey(row?.teams?.away)]);
+    return keys.size === decisiveKeys.size && [...keys].every((key) => decisiveKeys.has(key));
+  });
+  const totals = new Map<string, number>();
+  const teams = new Map<string, any>();
+  for (const leg of legs) {
+    const home = leg?.teams?.home;
+    const away = leg?.teams?.away;
+    const homeKey = teamKey(home);
+    const awayKey = teamKey(away);
+    const homeGoals = Number(leg?.goals?.home);
+    const awayGoals = Number(leg?.goals?.away);
+    teams.set(homeKey, home);
+    teams.set(awayKey, away);
+    if (Number.isFinite(homeGoals)) totals.set(homeKey, (totals.get(homeKey) ?? 0) + homeGoals);
+    if (Number.isFinite(awayGoals)) totals.set(awayKey, (totals.get(awayKey) ?? 0) + awayGoals);
+  }
+  const [firstKey, secondKey] = [...decisiveKeys];
+  const firstTotal = totals.get(firstKey);
+  const secondTotal = totals.get(secondKey);
+  if (firstTotal != null && secondTotal != null && firstTotal !== secondTotal) {
+    return teams.get(firstTotal > secondTotal ? firstKey : secondKey) ?? null;
+  }
+  if (decisiveFinal?.teams?.home?.winner === true) return decisiveFinal.teams.home;
+  if (decisiveFinal?.teams?.away?.winner === true) return decisiveFinal.teams.away;
   return null;
 }
