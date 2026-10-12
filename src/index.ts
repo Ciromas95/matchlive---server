@@ -491,7 +491,17 @@ app.get("/api/live", async (_req: Request, res: Response) => {
 
 app.get("/api/live/compact", async (_req: Request, res: Response) => {
   try {
-    setSharedCache(res, 2);
+    // Questo endpoint e la riconciliazione autorevole usata quando un client
+    // perde un delta SSE. Una risposta edge stale vanificherebbe il watchdog e
+    // potrebbe lasciare minuto e punteggio fermi pur con il provider aggiornato.
+    // La deduplica delle chiamate esterne resta garantita dalla cache interna
+    // getLiveFixtures/runOnce, quindi disabilitare la cache HTTP e sicuro.
+    res.setHeader(
+      "Cache-Control",
+      "private, no-store, no-cache, max-age=0, must-revalidate",
+    );
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
     let snapshot = getLiveStateSnapshot();
     let fixtures = snapshot.fixtures;
     let updatedAt = snapshot.updatedAt;
