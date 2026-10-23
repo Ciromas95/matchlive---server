@@ -88,6 +88,7 @@ async function apiGet(
       markProviderResult(responseMs, false);
       if (type === "live" || type === "brainLive") recordLiveProvider(providerQueueMs, responseMs);
       syncProviderQuota(error?.response?.headers, quotaRequestedAt);
+      error.source ??= "provider";
       throw error;
     }
     if (hasProviderErrors(res.data?.errors)) {
@@ -96,6 +97,7 @@ async function apiGet(
       if (type === "live" || type === "brainLive") recordLiveProvider(providerQueueMs, responseMs);
       const err: any = new Error("API-Football returned an application error");
       err.response = { status: 502 };
+      err.source = "provider";
       throw err;
     }
     const responseMs = Date.now() - providerStartedAt;
@@ -515,6 +517,23 @@ export async function getStandingsCached(
 export async function getLeagueSeasonFixturesCached(leagueId: number, season: number): Promise<any> {
   return fetchWithCache<any>(`leagueSeasonFixtures_${leagueId}_${season}`, 15 * 60, async () =>
     apiGet("/fixtures", "compact", { league: leagueId, season }),
+  );
+}
+
+/**
+ * Calendario stagionale complessivo della squadra, trasversale alle
+ * competizioni. È distinto dal calendario di una singola lega e viene
+ * condiviso fra Panoramica, cache locale e Redis.
+ */
+export async function getTeamSeasonFixturesCached(
+  teamId: number,
+  season: number,
+): Promise<any> {
+  return fetchWithCache<any>(
+    `teamSeasonFixtures_${teamId}_${season}`,
+    15 * 60,
+    () => apiGet("/fixtures", "other", { team: teamId, season }),
+    6 * 60 * 60,
   );
 }
 

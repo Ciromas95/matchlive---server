@@ -48,6 +48,7 @@ import { postgresReady, query as postgresQuery } from "./postgresInfrastructure"
 import { recordClientLiveTelemetry } from "./clientLiveTelemetry";
 import { startLineupScheduler } from "./lineupScheduler";
 import { inferCompetitionFormat, resolveCompetitionChampion } from "./competitionFormat";
+import { getTeamComparisonOverview } from "./teamComparison";
 
 dotenv.config();
 
@@ -305,6 +306,49 @@ app.get("/api/provider", async (req: Request, res: Response) => {
     return res.status(status >= 400 && status < 600 ? status : 502).json({
       error: "provider_request_failed",
       message: error?.message ?? "Dati temporaneamente non disponibili",
+    });
+  }
+});
+
+app.get("/api/comparison/overview", async (req: Request, res: Response) => {
+  const fixtureId = Number(req.query.fixtureId);
+  const homeTeamId = Number(req.query.homeTeamId);
+  const awayTeamId = Number(req.query.awayTeamId);
+  const period = String(req.query.period ?? "lastFive");
+  if (
+    !Number.isInteger(fixtureId) ||
+    fixtureId <= 0 ||
+    !Number.isInteger(homeTeamId) ||
+    homeTeamId <= 0 ||
+    !Number.isInteger(awayTeamId) ||
+    awayTeamId <= 0 ||
+    homeTeamId === awayTeamId ||
+    period !== "lastFive"
+  ) {
+    return res.status(400).json({
+      error: "invalid_comparison_parameters",
+      message:
+        "fixtureId, homeTeamId e awayTeamId devono essere ID validi; l'unico periodo supportato è lastFive.",
+    });
+  }
+  try {
+    const payload = await getTeamComparisonOverview({
+      fixtureId,
+      homeTeamId,
+      awayTeamId,
+    });
+    setSharedCache(res, 60);
+    return res.json(payload);
+  } catch (error: any) {
+    const status = Number(error?.status ?? error?.response?.status ?? 502);
+    const providerFailure =
+      error?.source === "provider" || Boolean(error?.response);
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      error: providerFailure
+        ? "comparison_provider_unavailable"
+        : "comparison_overview_failed",
+      source: providerFailure ? "provider" : "server",
+      message: error?.message ?? "Confronto temporaneamente non disponibile",
     });
   }
 });

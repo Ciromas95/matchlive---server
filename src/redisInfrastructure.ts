@@ -160,6 +160,7 @@ export async function withRedisSingleFlight<T>(
   readShared: () => Promise<T | null>,
   task: () => Promise<T>,
   ttlMs = 15_000,
+  options?: { followerWaitMs?: number; pollIntervalMs?: number },
 ): Promise<T> {
   if (!redisLocksReady()) return task();
   const lock = await acquireRedisLock(`singleflight:${name}`, ttlMs);
@@ -168,8 +169,14 @@ export async function withRedisSingleFlight<T>(
     finally { await releaseRedisLock(lock); }
   }
   singleFlightReuse += 1;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 40 + attempt * 20));
+  const followerWaitMs = Math.max(0, options?.followerWaitMs ?? 880);
+  const pollIntervalMs = Math.max(40, options?.pollIntervalMs ?? 120);
+  const deadline = Date.now() + followerWaitMs;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(pollIntervalMs, Math.max(1, remaining))),
+    );
     const shared = await readShared();
     if (shared != null) return shared;
   }
